@@ -1,0 +1,63 @@
+# WorldRegen configuration
+#
+# Resident, perpetual resource-world regenerator. It sweeps the worlds below,
+# and for each chunk not accessed for >= min-age-days (region-file timestamp)
+# proactively regenerates it: delete its data via Paper's Moonrise chunk system,
+# then load it async so vanilla regenerates it (terrain, structures, structure
+# mobs) with the current generator, then unload/save it. TPS-gated and bounded
+# by a concurrency cap so players never trigger mass on-demand generation. After
+# all worlds are swept it waits rescan-interval-hours and repeats. No FAWE.
+
+# Start the resident sweeper automatically when the server boots.
+enabled: true
+
+# Worlds to keep regenerating, swept in order. region-dir is relative to the
+# server's world container. world_2024 and its nether/end are Paper custom
+# dimensions stored under the primary level's dimensions folder.
+worlds:
+  - name: world_2024
+    region-dir: "world_2014/dimensions/minecraft/world_2024/region"
+  - name: world_2024_nether
+    region-dir: "world_2014/dimensions/minecraft/world_2024_nether/region"
+  - name: world_2024_the_end
+    region-dir: "world_2014/dimensions/minecraft/world_2024_the_end/region"
+
+# Only regenerate chunks not accessed for at least this many days (region-file
+# last-saved time; updated whenever a chunk is loaded, i.e. a player was near).
+# 0 = ignore age. Our own regen resets the clock, so the world refreshes on a
+# rolling cycle of roughly this length.
+min-age-days: 30
+
+# After a full sweep of all worlds, wait this long before sweeping again.
+rescan-interval-hours: 24
+
+# TPS gate (Paper 1-minute average). Pause below tps-pause, resume at/above
+# tps-resume (hysteresis so it does not flap around 18).
+tps-pause: 18.0
+tps-resume: 18.5
+
+# Pacing. Every interval-ticks the engine dispatches up to per-tick regens,
+# never exceeding max-concurrent-regens in flight at once (bounds generation
+# load; the real cost is chunk generation, done off the main thread).
+interval-ticks: 2
+per-tick: 4
+max-concurrent-regens: 4
+
+# Flush queued deletions/saves to disk every this many regens (durability).
+flush-every: 128
+
+# Skip any chunk with an online player within this many chunks (Chebyshev).
+# Loaded chunks are always skipped too (deleting a loaded chunk would be undone
+# when its in-memory copy re-saves). Skipped chunks are retried next sweep.
+player-safe-radius-chunks: 4
+
+# Skip chunks within this many chunks of each world's spawn (Chebyshev).
+# 0 = also regenerate spawn. Raise this to protect the Spawn2024 area.
+protect-spawn-radius-chunks: 0
+
+# Safety valve: if this many regens fail in a row (e.g. Moonrise internals
+# changed on a Paper update), auto-pause and log a SEVERE warning.
+max-consecutive-failures: 5
+
+# Persist progress and resume an in-progress sweep on server start.
+auto-resume: true
