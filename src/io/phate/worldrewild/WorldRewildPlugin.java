@@ -55,6 +55,17 @@ public final class WorldRewildPlugin extends JavaPlugin {
                     sender.sendMessage("§ccoordinates must be integers.");
                 }
             }
+            case "delete" -> {
+                if (args.length < 4) {
+                    sender.sendMessage("§cusage: /wr delete <world> <chunkX> <chunkZ>");
+                    return true;
+                }
+                try {
+                    engine.cmdDelete(sender, args[1], Integer.parseInt(args[2]), Integer.parseInt(args[3]));
+                } catch (NumberFormatException e) {
+                    sender.sendMessage("§ccoordinates must be integers.");
+                }
+            }
             case "vanillaregen" -> {
                 if (args.length < 4) {
                     sender.sendMessage("§cusage: /wr vanillaregen <world> <chunkX> <chunkZ>");

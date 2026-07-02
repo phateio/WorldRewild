@@ -1,9 +1,9 @@
 name: WorldRewild
-version: 0.5.0
+version: 0.6.0
 main: io.phate.worldrewild.WorldRewildPlugin
 api-version: "1.21"
 author: phate
-description: A Paper plugin for rewilding resource worlds by regenerating chunks left untouched for weeks — TPS-gated, no downtime.
+description: A Paper plugin for rewilding resource worlds.
 commands:
   worldrewild:
     aliases: [wr]

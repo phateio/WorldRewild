@@ -1,12 +1,16 @@
-# WorldRegen configuration
+# WorldRewild configuration
 #
-# Resident, perpetual resource-world regenerator. It sweeps the worlds below,
-# and for each chunk not accessed for >= min-age-days (region-file timestamp)
-# proactively regenerates it: delete its data via Paper's Moonrise chunk system,
-# then load it async so vanilla regenerates it (terrain, structures, structure
-# mobs) with the current generator, then unload/save it. TPS-gated and bounded
-# by a concurrency cap so players never trigger mass on-demand generation. After
-# all worlds are swept it waits rescan-interval-hours and repeats. No FAWE.
+# Resident, perpetual resource-world regenerator. It sweeps the worlds below one
+# region file at a time ("tile" = 32x32 chunks), nearest-to-spawn first. Each
+# tile is regenerated two-phase: delete every eligible chunk's data (via Paper's
+# Moonrise chunk system), then reload them so vanilla regenerates each from
+# scratch (terrain, structures, structure mobs) with the current generator, then
+# unload/save. Deleting the whole tile first lets interior chunks regenerate free
+# of old neighbours, so a cross-version map actually converts instead of being
+# blended back toward the old terrain. TPS-gated and bounded by a concurrency cap
+# so players never trigger mass on-demand generation. After all worlds are swept
+# it waits rescan-interval-hours and repeats; a thin biome-only rim left on tile
+# edges (still bordering old chunks) heals on the next re-sweep. No FAWE.
 
 # Start the resident sweeper automatically when the server boots.
 enabled: true
@@ -28,6 +32,11 @@ worlds:
 # rolling cycle of roughly this length.
 min-age-days: 30
 
+# Optional override for min-age-days with sub-day granularity (for testing or
+# tuning). >= 0 takes precedence over min-age-days; e.g. 600 = 10 minutes.
+# -1 (default) means "use min-age-days".
+min-age-seconds: -1
+
 # After a full sweep of all worlds, wait this long before sweeping again.
 rescan-interval-hours: 24
 
@@ -36,15 +45,14 @@ rescan-interval-hours: 24
 tps-pause: 18.0
 tps-resume: 18.5
 
-# Pacing. Every interval-ticks the engine dispatches up to per-tick regens,
+# Pacing. Every interval-ticks the engine dispatches up to per-tick reloads,
 # never exceeding max-concurrent-regens in flight at once (bounds generation
-# load; the real cost is chunk generation, done off the main thread).
+# load; the real cost is chunk generation, done off the main thread). The delete
+# phase runs at up to per-tick*4 per tick. Steady-state throughput is limited by
+# the server's chunk-generation worker pool (~10-15 chunks/s here).
 interval-ticks: 2
 per-tick: 4
 max-concurrent-regens: 4
-
-# Flush queued deletions/saves to disk every this many regens (durability).
-flush-every: 128
 
 # Skip any chunk with an online player within this many chunks (Chebyshev).
 # Loaded chunks are always skipped too (deleting a loaded chunk would be undone
@@ -55,7 +63,7 @@ player-safe-radius-chunks: 4
 # 0 = also regenerate spawn. Raise this to protect the Spawn2024 area.
 protect-spawn-radius-chunks: 0
 
-# Safety valve: if this many regens fail in a row (e.g. Moonrise internals
+# Safety valve: if this many deletes fail in a row (e.g. Moonrise internals
 # changed on a Paper update), auto-pause and log a SEVERE warning.
 max-consecutive-failures: 5
 
