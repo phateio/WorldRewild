@@ -67,11 +67,11 @@ See [`config.yml`](config.yml). Key options: `enabled` (auto-start on boot),
 ## Building
 
 ```sh
-./build.sh   # compiles with javac against the server's paper-api; outputs WorldRewild.jar
+./gradlew build   # outputs build/libs/WorldRewild-<version>.jar
 ```
 
-Requires JDK 21+ and a Paper server whose `libraries/` contain the matching
-`paper-api` (set `SRV` to your server path).
+Requires JDK 25 (Paper 26.2's API needs Java 25). The Paper API is resolved from
+Maven, so no local server is needed to compile.
 
 ## Notes
 

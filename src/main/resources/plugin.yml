@@ -1,5 +1,5 @@
-name: WorldRewild
-version: 0.7.0
+name: ${name}
+version: ${version}
 main: io.github.phateio.worldrewild.WorldRewild
 api-version: "1.21"
 author: shikendon
