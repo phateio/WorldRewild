@@ -1,5 +1,5 @@
 name: WorldRewild
-version: 0.6.0
+version: 0.7.0
 main: io.github.phateio.worldrewild.WorldRewild
 api-version: "1.21"
 author: shikendon
@@ -9,7 +9,7 @@ commands:
     aliases: [wr]
     description: Rewild resource worlds by regenerating long-untouched chunks.
     permission: worldrewild.admin
-    usage: "/wr <start|pause|resume|stop|status|count|reset|reload|region|probe|entities|vanillaregen>"
+    usage: "/wr <start|pause|resume|stop|status|count|reset|reload|region|vanillaregen|probe|entities>"
 permissions:
   worldrewild.admin:
     description: Manage the rewilder.

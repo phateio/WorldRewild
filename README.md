@@ -50,10 +50,9 @@ be DataFixer-upgraded, never truly regenerated.
 | `/wr count` | Dry run: how many chunks are eligible right now (per world) |
 | `/wr reset` | Clear saved progress |
 | `/wr reload` | Reload `config.yml` |
-| `/wr region <world> <cx1> <cz1> <cx2> <cz2>` | Manually regenerate a chunk rectangle now (refuses if players are inside) |
-| `/wr vanillaregen <world> <cx> <cz>` | Regenerate a single chunk now |
-| `/wr delete <world> <cx> <cz>` | Delete a chunk's data and flush, without reloading (diagnostic) |
-| `/wr probe <world> <cx> <cz> [material]` | Count a material in a chunk (diagnostic) |
+| `/wr region <world> <cx1> <cz1> <cx2> <cz2>` | Manually regenerate a chunk rectangle now, two-phase (refuses if players are inside) |
+| `/wr vanillaregen <world> <cx> <cz>` | Regenerate a single chunk now (subject to edge blending on a cross-version map — use `region` to convert an area) |
+| `/wr probe <world> <cx> <cz> <material>` | Count a material in a chunk (diagnostic) |
 | `/wr entities <world> <cx> <cz> [type]` | List entities in a chunk (diagnostic) |
 
 ## Configuration

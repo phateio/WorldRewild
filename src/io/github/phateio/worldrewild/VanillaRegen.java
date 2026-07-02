@@ -90,13 +90,4 @@ public final class VanillaRegen {
         init(world);
         flushStorages.invoke(null, getHandle.invoke(world));
     }
-
-    /**
-     * Delete a chunk's data and flush immediately. Loading it afterwards
-     * regenerates it. Convenience for one-shot / manual use.
-     */
-    public static void reset(World world, int cx, int cz) throws Exception {
-        deleteChunk(world, cx, cz);
-        flushLevel(world);
-    }
 }

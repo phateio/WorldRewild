@@ -8,6 +8,9 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class WorldRewild extends JavaPlugin {
 
+    private static final String USAGE =
+            "§6/wr §f<start|pause|resume|stop|status|count|reset|reload|region|vanillaregen|probe|entities>";
+
     private RegenEngine engine;
 
     @Override
@@ -27,19 +30,18 @@ public final class WorldRewild extends JavaPlugin {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("§6/wr §f<start|pause|resume|stop|status|count|reset|reload"
-                    + "|region|probe|entities|vanillaregen>");
+            sender.sendMessage(USAGE);
             return true;
         }
         switch (args[0].toLowerCase()) {
-            case "start" -> sender.sendMessage("§6[WorldRewild] §f" + engine.cmdStart());
-            case "pause" -> sender.sendMessage("§6[WorldRewild] §f" + engine.cmdPause());
-            case "resume" -> sender.sendMessage("§6[WorldRewild] §f" + engine.cmdResume());
-            case "stop" -> sender.sendMessage("§6[WorldRewild] §f" + engine.cmdStop());
-            case "reset" -> sender.sendMessage("§6[WorldRewild] §f" + engine.cmdReset());
+            case "start" -> reply(sender, engine.cmdStart());
+            case "pause" -> reply(sender, engine.cmdPause());
+            case "resume" -> reply(sender, engine.cmdResume());
+            case "stop" -> reply(sender, engine.cmdStop());
+            case "reset" -> reply(sender, engine.cmdReset());
             case "reload" -> {
                 engine.reloadConfig();
-                sender.sendMessage("§6[WorldRewild] §fconfig reloaded.");
+                reply(sender, "config reloaded.");
             }
             case "status" -> send(sender, engine.cmdStatus());
             case "count" -> engine.cmdCount(sender);
@@ -55,60 +57,52 @@ public final class WorldRewild extends JavaPlugin {
                     sender.sendMessage("§ccoordinates must be integers.");
                 }
             }
-            case "delete" -> {
-                if (args.length < 4) {
-                    sender.sendMessage("§cusage: /wr delete <world> <chunkX> <chunkZ>");
-                    return true;
-                }
-                try {
-                    engine.cmdDelete(sender, args[1], Integer.parseInt(args[2]), Integer.parseInt(args[3]));
-                } catch (NumberFormatException e) {
-                    sender.sendMessage("§ccoordinates must be integers.");
-                }
-            }
             case "vanillaregen" -> {
                 if (args.length < 4) {
                     sender.sendMessage("§cusage: /wr vanillaregen <world> <chunkX> <chunkZ>");
                     return true;
                 }
-                try {
-                    engine.vanillaRegen(sender, args[1], Integer.parseInt(args[2]), Integer.parseInt(args[3]));
-                } catch (NumberFormatException e) {
-                    sender.sendMessage("§ccoordinates must be integers.");
-                }
+                withChunk(sender, args, (cx, cz) -> engine.vanillaRegen(sender, args[1], cx, cz));
             }
             case "probe" -> {
-                if (args.length < 4) {
-                    sender.sendMessage("§cusage: /wr probe <world> <chunkX> <chunkZ> [material=DARK_OAK_PLANKS]");
+                if (args.length < 5) {
+                    sender.sendMessage("§cusage: /wr probe <world> <chunkX> <chunkZ> <material>");
                     return true;
                 }
-                try {
-                    String mat = args.length >= 5 ? args[4] : "DARK_OAK_PLANKS";
-                    send(sender, engine.cmdProbe(args[1], Integer.parseInt(args[2]), Integer.parseInt(args[3]), mat));
-                } catch (NumberFormatException e) {
-                    sender.sendMessage("§ccoordinates must be integers.");
-                }
+                withChunk(sender, args, (cx, cz) -> send(sender, engine.cmdProbe(args[1], cx, cz, args[4])));
             }
             case "entities" -> {
                 if (args.length < 4) {
                     sender.sendMessage("§cusage: /wr entities <world> <chunkX> <chunkZ> [typeFilter]");
                     return true;
                 }
-                try {
-                    String f = args.length >= 5 ? args[4] : null;
-                    send(sender, engine.cmdEntities(args[1], Integer.parseInt(args[2]), Integer.parseInt(args[3]), f));
-                } catch (NumberFormatException e) {
-                    sender.sendMessage("§ccoordinates must be integers.");
-                }
+                String filter = args.length >= 5 ? args[4] : null;
+                withChunk(sender, args, (cx, cz) -> send(sender, engine.cmdEntities(args[1], cx, cz, filter)));
             }
             default -> sender.sendMessage("§cunknown subcommand: " + args[0]);
         }
         return true;
     }
 
-    private static void send(CommandSender sender, List<String> lines) {
-        for (String l : lines) {
-            sender.sendMessage(l);
+    @FunctionalInterface
+    private interface ChunkAction {
+        void run(int cx, int cz);
+    }
+
+    /** Parse {@code args[2]} (chunkX) and {@code args[3]} (chunkZ), then run the action. */
+    private static void withChunk(CommandSender sender, String[] args, ChunkAction action) {
+        try {
+            action.run(Integer.parseInt(args[2]), Integer.parseInt(args[3]));
+        } catch (NumberFormatException e) {
+            sender.sendMessage("§ccoordinates must be integers.");
         }
+    }
+
+    private static void reply(CommandSender sender, String message) {
+        sender.sendMessage("§6[WorldRewild] §f" + message);
+    }
+
+    private static void send(CommandSender sender, List<String> lines) {
+        lines.forEach(sender::sendMessage);
     }
 }
