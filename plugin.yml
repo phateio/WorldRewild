@@ -1,8 +1,8 @@
 name: WorldRewild
 version: 0.6.0
-main: io.phate.worldrewild.WorldRewildPlugin
+main: io.github.phateio.worldrewild.WorldRewild
 api-version: "1.21"
-author: phate
+author: shikendon
 description: A Paper plugin for rewilding resource worlds.
 commands:
   worldrewild:

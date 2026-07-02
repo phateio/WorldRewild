@@ -1,4 +1,4 @@
-package io.phate.worldrewild;
+package io.github.phateio.worldrewild;
 
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
@@ -58,7 +58,7 @@ public final class RegenEngine {
         }
     }
 
-    private final WorldRewildPlugin plugin;
+    private final WorldRewild plugin;
 
     // Config snapshot.
     private final List<WorldEntry> worldEntries = new ArrayList<>();
@@ -106,7 +106,7 @@ public final class RegenEngine {
     private final File targetsFile;
     private final File stateFile;
 
-    RegenEngine(WorldRewildPlugin plugin) {
+    RegenEngine(WorldRewild plugin) {
         this.plugin = plugin;
         this.targetsFile = new File(plugin.getDataFolder(), "targets.bin");
         this.stateFile = new File(plugin.getDataFolder(), "state.properties");

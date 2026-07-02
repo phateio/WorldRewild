@@ -1,4 +1,4 @@
-package io.phate.worldrewild;
+package io.github.phateio.worldrewild;
 
 import java.lang.reflect.Method;
 

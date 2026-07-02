@@ -1,4 +1,4 @@
-package io.phate.worldrewild;
+package io.github.phateio.worldrewild;
 
 import java.util.List;
 
@@ -6,7 +6,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 
-public final class WorldRewildPlugin extends JavaPlugin {
+public final class WorldRewild extends JavaPlugin {
 
     private RegenEngine engine;
 
