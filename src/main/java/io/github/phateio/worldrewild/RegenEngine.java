@@ -8,6 +8,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -723,24 +724,15 @@ public final class RegenEngine {
             return EMPTY;
         }
         long now = System.currentTimeMillis() / 1000L;
-        int count = 0;
-        for (int i = 0; i < SLOTS; i++) {
-            if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now)) {
-                count++;
-            }
-        }
-        if (count == 0) {
-            return EMPTY;
-        }
-        int[] arr = new int[count * 2];
+        int[] buf = new int[SLOTS * 2]; // worst case: every slot eligible
         int k = 0;
         for (int i = 0; i < SLOTS; i++) {
             if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now)) {
-                arr[k++] = rx * 32 + (i & 31);
-                arr[k++] = rz * 32 + (i >> 5);
+                buf[k++] = rx * 32 + (i & 31);
+                buf[k++] = rz * 32 + (i >> 5);
             }
         }
-        return arr;
+        return k == 0 ? EMPTY : Arrays.copyOf(buf, k);
     }
 
     /** Count eligible chunks across all region files in a world (for /wr count). */
