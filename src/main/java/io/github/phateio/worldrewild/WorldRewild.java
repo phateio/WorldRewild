@@ -8,20 +8,26 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class WorldRewild extends JavaPlugin {
 
-    private static final String USAGE =
-            "§6/wr §f<start|pause|resume|stop|status|count|reset|reload|region|vanillaregen|probe|entities>";
+    private static final String USAGE = "§6/wr §f<start|pause|resume|stop|status|count|reset|reload"
+            + "|region|vanillaregen|struct|end|probe|entities>";
 
     private RegenEngine engine;
+    private StructureReset structures;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         engine = new RegenEngine(this);
         engine.onEnable();
+        structures = new StructureReset(this, engine);
+        structures.onEnable();
     }
 
     @Override
     public void onDisable() {
+        if (structures != null) {
+            structures.onDisable();
+        }
         if (engine != null) {
             engine.onDisable();
         }
@@ -40,7 +46,8 @@ public final class WorldRewild extends JavaPlugin {
             case "stop" -> reply(sender, engine.cmdStop());
             case "reset" -> reply(sender, engine.cmdReset());
             case "reload" -> {
-                engine.reloadConfig();
+                engine.reloadConfig(); // re-reads config.yml from disk for both modules
+                structures.reload();   // re-read + re-arm timers so schedule/enabled apply live
                 reply(sender, "config reloaded.");
             }
             case "status" -> send(sender, engine.cmdStatus());
@@ -63,6 +70,21 @@ public final class WorldRewild extends JavaPlugin {
                     return true;
                 }
                 withChunk(sender, args, (cx, cz) -> engine.vanillaRegen(sender, args[1], cx, cz));
+            }
+            case "struct" -> {
+                switch (args.length >= 2 ? args[1].toLowerCase() : "") {
+                    case "status" -> send(sender, structures.cmdStatus());
+                    case "scan" -> structures.cmdScan(sender);
+                    case "reset" -> structures.cmdReset(sender, args.length >= 3 ? args[2] : null);
+                    default -> sender.sendMessage("§cusage: /wr struct <status|scan|reset [type]>");
+                }
+            }
+            case "end" -> {
+                if (args.length >= 2 && args[1].equalsIgnoreCase("reset")) {
+                    structures.cmdEndReset(sender);
+                } else {
+                    sender.sendMessage("§cusage: /wr end reset");
+                }
             }
             case "probe" -> {
                 if (args.length < 5) {

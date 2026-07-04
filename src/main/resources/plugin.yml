@@ -9,7 +9,7 @@ commands:
     aliases: [wr]
     description: Rewild resource worlds by regenerating long-untouched chunks.
     permission: worldrewild.admin
-    usage: "/wr <start|pause|resume|stop|status|count|reset|reload|region|vanillaregen|probe|entities>"
+    usage: "/wr <start|pause|resume|stop|status|count|reset|reload|region|vanillaregen|struct|end|probe|entities>"
 permissions:
   worldrewild.admin:
     description: Manage the rewilder.

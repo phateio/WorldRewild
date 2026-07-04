@@ -1,5 +1,6 @@
 package io.github.phateio.worldrewild;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 import org.bukkit.World;
@@ -36,6 +37,15 @@ public final class VanillaRegen {
     private static Object chunkData;
     private static Object entityData;
     private static Object poiData;
+
+    // End dragon-fight re-scan (looked up separately; a name change here must not
+    // break chunk deletion above). Only needsStateScanning is reflected — the
+    // Bukkit DragonBattle API covers previously-killed, and scanState() re-derives
+    // dragon uuid / killed / respawn stage on the forced re-scan.
+    private static volatile boolean dragonInit;
+    private static Method getDragonFight;
+    private static Method setDirty;
+    private static Field fNeedsScan;
 
     private static synchronized void init(World world) throws Exception {
         if (initialised) {
@@ -89,5 +99,43 @@ public final class VanillaRegen {
     public static void flushStorages(World world) throws Exception {
         init(world);
         flushStorages.invoke(null, getHandle.invoke(world));
+    }
+
+    private static synchronized void initDragon() throws Exception {
+        if (dragonInit) {
+            return;
+        }
+        Class<?> serverLevel = Class.forName("net.minecraft.server.level.ServerLevel");
+        Class<?> fight = Class.forName("net.minecraft.world.level.dimension.end.EnderDragonFight");
+        Class<?> savedData = Class.forName("net.minecraft.world.level.saveddata.SavedData");
+        getDragonFight = serverLevel.getMethod("getDragonFight");
+        setDirty = savedData.getMethod("setDirty");
+        fNeedsScan = fight.getDeclaredField("needsStateScanning");
+        fNeedsScan.setAccessible(true);
+        dragonInit = true;
+    }
+
+    /**
+     * Force the End dragon fight to re-scan its state on the next tick with a player
+     * present, and persist that. On the re-scan the fight re-derives everything —
+     * previously-killed (from whether an exit portal / end gateway still exists within
+     * 8 chunks of the origin), the live dragon, killed flag and respawn stage — so a
+     * fresh dragon spawns once those blocks are gone (which the age-based sweep handles
+     * when it regenerates the central island). The caller resets the previously-killed
+     * flag via the stable Bukkit DragonBattle API; only needsStateScanning has no
+     * Bukkit setter, so it alone is reflected here. Returns false if this world has no
+     * dragon fight. Reflects into the NMS EnderDragonFight (version specific), separate
+     * from the delete-init so a mismatch here cannot break chunk regeneration.
+     */
+    public static boolean forceEndRescan(World world) throws Exception {
+        init(world);
+        initDragon();
+        Object fight = getDragonFight.invoke(getHandle.invoke(world));
+        if (fight == null) {
+            return false;
+        }
+        fNeedsScan.setBoolean(fight, true);
+        setDirty.invoke(fight); // persist, else the change reverts on the next save
+        return true;
     }
 }

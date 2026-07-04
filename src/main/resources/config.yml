@@ -77,3 +77,49 @@ max-consecutive-failures: 5
 
 # Persist progress and resume an in-progress sweep on server start.
 auto-resume: true
+
+# ---------------------------------------------------------------------------
+# Structure reset — regenerate specific rare structures on a fast (daily) cycle,
+# independent of min-age-days. Structures are found automatically by reading each
+# chunk's stored structure data (structures.starts) from the region files, so no
+# in-game marking is needed. Each listed structure's footprint is regenerated
+# two-phase (the same core as the resident sweep), skipping any structure a
+# player is currently in. Loot chests, structure mobs and the build come back
+# fresh, so rare loot structures are re-raidable on this cycle.
+structure-reset:
+  # Regenerate the listed structures shortly after boot, then on every wall-clock
+  # multiple of interval-hours past local midnight (e.g. 6 -> 00:00/06:00/12:00/
+  # 18:00). It re-arms each cycle from the clock, so it stays aligned and never
+  # drifts. The plugin logs the next scheduled time on each (re)schedule.
+  enabled: true
+  interval-hours: 6
+  # How often to re-scan region files for newly generated structures. The first
+  # scan is a full pass (heavier, async); later scans only re-read chunks saved
+  # since the last scan, so they are cheap.
+  rescan-hours: 168
+  # Extra chunks added around each structure's footprint before regenerating.
+  # Same-version regen needs no margin (0); raise only if edges look off.
+  footprint-margin-chunks: 0
+  # Structure types to reset (Minecraft ids without the namespace). Truly rare,
+  # high-value ones only — common ones (shipwreck, monument, trial_chambers,
+  # buried_treasure, mineshaft, villages, ocean_ruin, ruined_portal) are left out
+  # on purpose so the daily reset stays light. Add more if you want.
+  types:
+    - mansion
+    - stronghold
+    - ancient_city
+    - jungle_pyramid
+    - desert_pyramid
+    - pillager_outpost
+    - bastion_remnant
+    - end_city
+  # The End dragon: on each reset, if the End is empty and the dragon is dead,
+  # reset the fight's saved state so a fresh dragon can spawn again. This only
+  # resets the fight flags — the exit portal / end gateways are cleared by the
+  # normal age-based sweep when it regenerates the central island (the fight
+  # re-derives "previously killed" from those blocks), so the dragon actually
+  # respawns on the next entry after that sweep. Renews the end-game journey:
+  # stronghold -> portal -> dragon -> end city -> elytra.
+  end-central:
+    world: world_2024_the_end
+    respawn-dragon: true
