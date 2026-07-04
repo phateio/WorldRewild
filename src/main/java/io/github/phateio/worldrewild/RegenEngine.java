@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.TreeMap;
+import java.util.function.IntConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -56,7 +57,10 @@ public final class RegenEngine {
     private static final int SLOTS = 1024;        // 32x32 chunk slots per region file
     private static final int[] EMPTY = new int[0];
 
-    private record WorldEntry(String name, File regionDir) {}
+    private record WorldEntry(String name, File regionDir, long minAgeSeconds) {}
+
+    /** A chunk rectangle (inclusive) to regenerate as one box of a batch. */
+    record Box(World world, int minCx, int minCz, int maxCx, int maxCz) {}
 
     @FunctionalInterface
     private interface RegionFileConsumer {
@@ -93,7 +97,7 @@ public final class RegenEngine {
     private long completed = 0;      // chunks regenerated this sweep (across worlds)
     private int inFlight = 0;        // async regens in progress (main-thread only)
     private long nextSweepEpochMs = 0;
-    private boolean manualActive = false;
+    private boolean busy = false;   // a manual/structure regen batch is running; pauses the resident sweep
     private BukkitTask task;
     private int consecutiveFailures = 0;
     private String pauseReason = null;
@@ -124,12 +128,17 @@ public final class RegenEngine {
         plugin.reloadConfig();
         var c = plugin.getConfig();
         File container = plugin.getServer().getWorldContainer();
+        // Global default age threshold. min-age-seconds (when >= 0) overrides
+        // min-age-days, for sub-day tuning/testing.
+        long secs = c.getLong("min-age-seconds", -1L);
+        minAgeSeconds = secs >= 0 ? secs : Math.max(0, c.getInt("min-age-days", 90)) * 86400L;
         worldEntries.clear();
         for (Map<?, ?> m : c.getMapList("worlds")) {
             Object n = m.get("name");
             Object rd = m.get("region-dir");
             if (n != null && rd != null) {
-                worldEntries.add(new WorldEntry(n.toString(), new File(container, rd.toString())));
+                worldEntries.add(new WorldEntry(n.toString(), new File(container, rd.toString()),
+                        resolveMinAge(m, minAgeSeconds)));
             }
         }
         tpsPause = c.getDouble("tps-pause", 18.0);
@@ -140,12 +149,24 @@ public final class RegenEngine {
         playerSafeRadius = Math.max(0, c.getInt("player-safe-radius-chunks", 4));
         protectSpawnRadius = Math.max(0, c.getInt("protect-spawn-radius-chunks", 0));
         maxConsecutiveFailures = Math.max(1, c.getInt("max-consecutive-failures", 5));
-        // min-age-seconds (when >= 0) overrides min-age-days, for sub-day tuning/testing.
-        long secs = c.getLong("min-age-seconds", -1L);
-        minAgeSeconds = secs >= 0 ? secs : Math.max(0, c.getInt("min-age-days", 30)) * 86400L;
         rescanIntervalMs = Math.max(1L, c.getLong("rescan-interval-hours", 24L)) * 3600_000L;
         enabled = c.getBoolean("enabled", true);
         autoResume = c.getBoolean("auto-resume", true);
+    }
+
+    /**
+     * Age threshold for one world: its own {@code min-age-seconds} (>= 0) or
+     * {@code min-age-days} overrides the global default, so a world can be rewilded
+     * on a faster or slower cycle than the rest (e.g. a fresher End).
+     */
+    private static long resolveMinAge(Map<?, ?> m, long globalSeconds) {
+        if (m.get("min-age-seconds") instanceof Number s && s.longValue() >= 0) {
+            return s.longValue();
+        }
+        if (m.get("min-age-days") instanceof Number d) {
+            return Math.max(0L, d.longValue()) * 86400L;
+        }
+        return globalSeconds;
     }
 
     // --------------------------------------------------------------- lifecycle
@@ -284,12 +305,13 @@ public final class RegenEngine {
         List<String> out = new ArrayList<>();
         String worldInfo = cur != null ? cur.name() + " (" + (worldIndex + 1) + "/" + worldEntries.size() + ")" : "-";
         out.add("§6[WorldRewild] §fstate=§e" + state + (scanning ? " §c(scanning)" : "")
-                + (manualActive ? " §c(manual running)" : ""));
+                + (busy ? " §c(batch running)" : ""));
         out.add("§7world=§f" + worldInfo + " §7tps-gate=§f" + tpsPause + "/" + tpsResume
                 + " §7tps-paused=§f" + tpsPaused);
         out.add("§7current TPS=§f" + String.format("%.2f", currentTps())
                 + " §7interval=§f" + intervalTicks + "t §7per-tick=§f" + perTick
-                + " §7in-flight=§f" + inFlight + "/" + maxConcurrent + " §7min-age=§f" + ageStr());
+                + " §7in-flight=§f" + inFlight + "/" + maxConcurrent + " §7min-age=§f"
+                + ageStr(cur != null ? cur.minAgeSeconds() : minAgeSeconds));
         out.add("§7progress: §a" + completed + "§7 regen this sweep, tile §f" + regionPos + "§7/§f" + regionCount
                 + (regionCount > 0 ? " §7(" + String.format("%.1f", 100.0 * regionPos / regionCount) + "%)" : "")
                 + (tileActive ? " §7[" + (tileDeleting ? "del " + tileDelPos : "gen " + tileLoadPos)
@@ -305,7 +327,7 @@ public final class RegenEngine {
         return out;
     }
 
-    private record CountJob(String name, File regionDir, int spawnCx, int spawnCz) {}
+    private record CountJob(String name, File regionDir, int spawnCx, int spawnCz, long minAgeSeconds) {}
 
     /** Dry scan: report eligible chunk counts per configured world, without starting. */
     void cmdCount(CommandSender sender) {
@@ -317,14 +339,15 @@ public final class RegenEngine {
         for (WorldEntry e : worldEntries) {
             World w = getWorld(e.name());
             if (w == null) {
-                jobs.add(new CountJob(e.name(), null, 0, 0));
+                jobs.add(new CountJob(e.name(), null, 0, 0, e.minAgeSeconds()));
             } else {
                 Location s = w.getSpawnLocation();
-                jobs.add(new CountJob(e.name(), e.regionDir(), s.getBlockX() >> 4, s.getBlockZ() >> 4));
+                jobs.add(new CountJob(e.name(), e.regionDir(), s.getBlockX() >> 4, s.getBlockZ() >> 4,
+                        e.minAgeSeconds()));
             }
         }
-        sender.sendMessage("§6[count] §fscanning " + jobs.size() + " world(s), min-age="
-                + ageStr() + ", protect-spawn=" + protectSpawnRadius + "...");
+        sender.sendMessage("§6[count] §fscanning " + jobs.size() + " world(s), protect-spawn="
+                + protectSpawnRadius + "...");
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             List<String> lines = new ArrayList<>();
             long grand = 0;
@@ -334,16 +357,16 @@ public final class RegenEngine {
                     continue;
                 }
                 try {
-                    long c = countEligible(j.regionDir(), j.spawnCx(), j.spawnCz());
+                    long c = countEligible(j.regionDir(), j.spawnCx(), j.spawnCz(), j.minAgeSeconds());
                     grand += c;
-                    lines.add("§7  " + j.name() + ": §e" + c);
+                    lines.add("§7  " + j.name() + ": §e" + c + " §7(min-age=" + ageStr(j.minAgeSeconds()) + ")");
                 } catch (Throwable t) {
                     lines.add("§7  " + j.name() + ": §cscan failed " + t);
                 }
             }
             final long g = grand;
             plugin.getServer().getScheduler().runTask(plugin, () -> {
-                sender.sendMessage("§6[count] §feligible chunks (min-age=" + ageStr() + "):");
+                sender.sendMessage("§6[count] §feligible chunks:");
                 lines.forEach(sender::sendMessage);
                 sender.sendMessage("§6[count] §ftotal: §e" + g);
             });
@@ -352,108 +375,151 @@ public final class RegenEngine {
 
     // ------------------------------------------------------------- manual ops
 
-    /** Manually regenerate a rectangle of chunks (force; refuses if players are in/near it). */
+    /** Manually regenerate a rectangle of chunks now (two-phase; refuses if players are in/near it). */
     void cmdRegion(CommandSender sender, String worldName, int ax, int az, int bx, int bz) {
         World w = getWorld(worldName);
         if (w == null) {
             sender.sendMessage("§cWorld '" + worldName + "' not loaded.");
             return;
         }
-        if (manualActive) {
-            sender.sendMessage("§cA manual region job is already running.");
+        int minCx = Math.min(ax, bx);
+        int maxCx = Math.max(ax, bx);
+        int minCz = Math.min(az, bz);
+        int maxCz = Math.max(az, bz);
+        if (playersNearBox(w, minCx, minCz, maxCx, maxCz)) {
+            sender.sendMessage("§cRefused: a player is in/near the region. Clear the area first.");
             return;
         }
-        final int minCx = Math.min(ax, bx);
-        final int maxCx = Math.max(ax, bx);
-        final int minCz = Math.min(az, bz);
-        final int maxCz = Math.max(az, bz);
-        for (Player p : w.getPlayers()) {
-            int px = p.getLocation().getBlockX() >> 4;
-            int pz = p.getLocation().getBlockZ() >> 4;
-            if (px >= minCx - playerSafeRadius && px <= maxCx + playerSafeRadius
-                    && pz >= minCz - playerSafeRadius && pz <= maxCz + playerSafeRadius) {
-                sender.sendMessage("§cRefused: player " + p.getName()
-                        + " is in/near the region. Clear the area first.");
-                return;
-            }
+        long cells = (long) (maxCx - minCx + 1) * (maxCz - minCz + 1);
+        boolean started = runBatch(List.of(new Box(w, minCx, minCz, maxCx, maxCz)), null,
+                () -> sender.sendMessage("§6[region] §fdone regenerating " + cells + " chunks in " + worldName + "."));
+        sender.sendMessage(started
+                ? "§6[region] §fregenerating " + cells + " chunks in " + worldName + " (two-phase)..."
+                : "§cA regen batch is already running; try again shortly.");
+    }
+
+    // ------------------------------------------------------------- batch regen
+
+    /**
+     * Two-phase regenerate a batch of chunk rectangles as one job, pausing the
+     * resident sweep while it runs. Each box: delete every chunk (skipping ones
+     * with a nearby player or already loaded), flush, then reload the deleted
+     * ones so they regenerate — TPS-gated and concurrency-capped. {@code onBoxDone}
+     * runs after each box's chunks are regenerated; {@code onDone} at the very end.
+     * Returns false (starting nothing) if a batch is already running or empty.
+     */
+    boolean runBatch(List<Box> boxes, IntConsumer onBoxDone, Runnable onDone) {
+        if (busy || boxes.isEmpty()) {
+            return false;
         }
-        final int wc = maxCx - minCx + 1;
-        final long cells = (long) wc * (maxCz - minCz + 1);
-        sender.sendMessage("§6[region] §f" + cells + " chunks in " + worldName
-                + " (" + minCx + "," + minCz + ")..(" + maxCx + "," + maxCz + "), phase 1/2: deleting...");
-        manualActive = true;
-        // Delete the whole rectangle first, then regenerate, so interior chunks
-        // regenerate free of old neighbours (see class doc).
+        busy = true;
         new BukkitRunnable() {
-            long delIdx = 0;
-            long loadIdx = 0;
-            long deleted = 0;
-            long done = 0;
-            long skipped = 0;
+            int bi = 0;
             boolean deleting = true;
+            long delIdx = 0;
+            final List<int[]> deleted = new ArrayList<>();
+            int loadPos = 0;
+
+            private void nextBox() {
+                bi++;
+                deleting = true;
+                delIdx = 0;
+                deleted.clear();
+                loadPos = 0;
+            }
 
             @Override
             public void run() {
                 if (!plugin.isEnabled()) {
                     cancel();
-                    manualActive = false;
+                    busy = false;
                     return;
                 }
+                if (bi >= boxes.size()) {
+                    cancel();
+                    busy = false;
+                    if (onDone != null) {
+                        onDone.run();
+                    }
+                    return;
+                }
+                Box box = boxes.get(bi);
+                World w = box.world();
+                if (w == null) {
+                    if (onBoxDone != null) {
+                        onBoxDone.accept(bi);
+                    }
+                    nextBox();
+                    return;
+                }
+                int wc = box.maxCx() - box.minCx() + 1;
+                long cells = (long) wc * (box.maxCz() - box.minCz() + 1);
                 if (deleting) {
                     int n = 0;
-                    while (n < perTick * 4 && delIdx < cells) {
+                    int budget = perTick * 4;
+                    while (n < budget && delIdx < cells) {
                         if (currentTps() < tpsPause) {
                             return;
                         }
-                        int cx = minCx + (int) (delIdx % wc);
-                        int cz = minCz + (int) (delIdx / wc);
+                        int cx = box.minCx() + (int) (delIdx % wc);
+                        int cz = box.minCz() + (int) (delIdx / wc);
                         delIdx++;
                         n++;
-                        if (w.isChunkLoaded(cx, cz)) {
-                            continue; // a loaded chunk cannot be safely deleted; skip in load phase too
+                        if (playerNear(w, cx, cz) || w.isChunkLoaded(cx, cz)) {
+                            continue;
                         }
                         try {
                             VanillaRegen.deleteChunk(w, cx, cz);
-                            deleted++;
+                            deleted.add(new int[]{cx, cz});
                         } catch (Throwable t) {
-                            plugin.getLogger().warning("region delete failed at " + worldName
+                            plugin.getLogger().warning("batch delete failed at " + w.getName()
                                     + " chunk(" + cx + "," + cz + "): " + t);
                         }
                     }
                     if (delIdx >= cells) {
                         flushStoragesQuietly(w);
                         deleting = false;
-                        sender.sendMessage("§6[region] §fdeleted " + deleted + "; phase 2/2: regenerating...");
                     }
                     return;
                 }
                 int dispatched = 0;
                 while (dispatched < perTick && inFlight < maxConcurrent) {
-                    if (loadIdx >= cells) {
+                    if (loadPos >= deleted.size()) {
                         if (inFlight == 0) {
-                            cancel();
-                            manualActive = false;
                             flushQuietly(w);
-                            sender.sendMessage("§6[region] §fdone: " + done + " regenerated, " + skipped + " skipped.");
+                            if (onBoxDone != null) {
+                                onBoxDone.accept(bi);
+                            }
+                            nextBox();
                         }
                         return;
                     }
                     if (currentTps() < tpsPause) {
                         return;
                     }
-                    int cx = minCx + (int) (loadIdx % wc);
-                    int cz = minCz + (int) (loadIdx / wc);
-                    loadIdx++;
-                    if (playerNear(w, cx, cz) || w.isChunkLoaded(cx, cz)) {
-                        skipped++;
+                    int[] c = deleted.get(loadPos++);
+                    if (w.isChunkLoaded(c[0], c[1])) {
                         continue;
                     }
-                    loadRegen(w, cx, cz, null);
-                    done++;
+                    loadRegen(w, c[0], c[1], null);
                     dispatched++;
                 }
             }
         }.runTaskTimer(plugin, 1L, intervalTicks);
+        return true;
+    }
+
+    /** True if a player is within player-safe-radius of the box (chunk coords, inclusive). */
+    boolean playersNearBox(World w, int minCx, int minCz, int maxCx, int maxCz) {
+        for (Player p : w.getPlayers()) {
+            int px = p.getLocation().getBlockX() >> 4;
+            int pz = p.getLocation().getBlockZ() >> 4;
+            if (px >= minCx - playerSafeRadius && px <= maxCx + playerSafeRadius
+                    && pz >= minCz - playerSafeRadius && pz <= maxCz + playerSafeRadius) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Manually regenerate a single chunk immediately (proactive). */
@@ -614,10 +680,11 @@ public final class RegenEngine {
         final int spawnCz = curSpawnCz;
         final File rd = cur.regionDir();
         final String name = cur.name();
+        final long minAge = cur.minAgeSeconds();
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             int[] built;
             try {
-                built = listRegions(rd, spawnCx, spawnCz);
+                built = listRegions(rd, spawnCx, spawnCz, minAge);
             } catch (Throwable t) {
                 plugin.getLogger().severe("Scan failed for " + name + ": " + t);
                 built = EMPTY;
@@ -666,7 +733,8 @@ public final class RegenEngine {
     }
 
     /** Is slot {@code i} (0..1023) present on disk, past min-age, and outside the spawn guard? */
-    private boolean isEligible(byte[] header, int i, int rx, int rz, int spawnCx, int spawnCz, long nowSec) {
+    private boolean isEligible(byte[] header, int i, int rx, int rz, int spawnCx, int spawnCz,
+                              long nowSec, long minAge) {
         int b = i * 4;
         if ((header[b] | header[b + 1] | header[b + 2] | header[b + 3]) == 0) {
             return false; // no chunk stored in this slot
@@ -678,9 +746,9 @@ public final class RegenEngine {
                 return false;
             }
         }
-        if (minAgeSeconds > 0) {
+        if (minAge > 0) {
             long ts = readUInt32(header, 4096 + b);
-            if (ts > 0 && (nowSec - ts) < minAgeSeconds) {
+            if (ts > 0 && (nowSec - ts) < minAge) {
                 return false;
             }
         }
@@ -688,7 +756,7 @@ public final class RegenEngine {
     }
 
     /** Region files with at least one eligible chunk, packed [rx,rz,...] nearest-to-spawn first. */
-    private int[] listRegions(File regionDir, int spawnCx, int spawnCz) throws IOException {
+    private int[] listRegions(File regionDir, int spawnCx, int spawnCz, long minAge) throws IOException {
         List<long[]> regs = new ArrayList<>();
         long now = System.currentTimeMillis() / 1000L;
         byte[] header = new byte[HEADER_BYTES];
@@ -697,7 +765,7 @@ public final class RegenEngine {
                 return;
             }
             for (int i = 0; i < SLOTS; i++) {
-                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now)) {
+                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge)) {
                     long dx = (long) (rx * 32 + 16) - spawnCx;
                     long dz = (long) (rz * 32 + 16) - spawnCz;
                     regs.add(new long[]{dx * dx + dz * dz, rx, rz});
@@ -718,7 +786,7 @@ public final class RegenEngine {
     }
 
     /** Eligible chunks within one region file, packed [cx,cz,...]. */
-    private int[] scanTile(File regionDir, int rx, int rz, int spawnCx, int spawnCz) throws IOException {
+    private int[] scanTile(File regionDir, int rx, int rz, int spawnCx, int spawnCz, long minAge) throws IOException {
         byte[] header = new byte[HEADER_BYTES];
         if (!readHeader(new File(regionDir, "r." + rx + "." + rz + ".mca"), header)) {
             return EMPTY;
@@ -727,7 +795,7 @@ public final class RegenEngine {
         int[] buf = new int[SLOTS * 2]; // worst case: every slot eligible
         int k = 0;
         for (int i = 0; i < SLOTS; i++) {
-            if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now)) {
+            if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge)) {
                 buf[k++] = rx * 32 + (i & 31);
                 buf[k++] = rz * 32 + (i >> 5);
             }
@@ -736,7 +804,7 @@ public final class RegenEngine {
     }
 
     /** Count eligible chunks across all region files in a world (for /wr count). */
-    private long countEligible(File regionDir, int spawnCx, int spawnCz) throws IOException {
+    private long countEligible(File regionDir, int spawnCx, int spawnCz, long minAge) throws IOException {
         long now = System.currentTimeMillis() / 1000L;
         byte[] header = new byte[HEADER_BYTES];
         long[] count = {0L};
@@ -745,7 +813,7 @@ public final class RegenEngine {
                 return;
             }
             for (int i = 0; i < SLOTS; i++) {
-                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now)) {
+                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge)) {
                     count[0]++;
                 }
             }
@@ -763,7 +831,7 @@ public final class RegenEngine {
     }
 
     private void tick() {
-        if (manualActive || state == State.STOPPED || state == State.PAUSED) {
+        if (busy || state == State.STOPPED || state == State.PAUSED) {
             return;
         }
         if (state == State.WAITING) {
@@ -811,7 +879,7 @@ public final class RegenEngine {
         int rz = regions[2 * regionPos + 1];
         int[] chunks;
         try {
-            chunks = scanTile(cur.regionDir(), rx, rz, curSpawnCx, curSpawnCz);
+            chunks = scanTile(cur.regionDir(), rx, rz, curSpawnCx, curSpawnCz, cur.minAgeSeconds());
         } catch (Throwable t) {
             plugin.getLogger().warning("Tile scan failed r." + rx + "." + rz + ": " + t);
             chunks = EMPTY;
@@ -954,11 +1022,11 @@ public final class RegenEngine {
                 | ((a[off + 2] & 0xFFL) << 8) | (a[off + 3] & 0xFFL);
     }
 
-    private String ageStr() {
-        if (minAgeSeconds >= 86400) return (minAgeSeconds / 86400L) + "d";
-        if (minAgeSeconds >= 3600) return (minAgeSeconds / 3600L) + "h";
-        if (minAgeSeconds >= 60) return (minAgeSeconds / 60L) + "m";
-        return minAgeSeconds + "s";
+    private static String ageStr(long secs) {
+        if (secs >= 86400) return (secs / 86400L) + "d";
+        if (secs >= 3600) return (secs / 3600L) + "h";
+        if (secs >= 60) return (secs / 60L) + "m";
+        return secs + "s";
     }
 
     private String progressLine() {

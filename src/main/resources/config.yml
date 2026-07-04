@@ -18,6 +18,11 @@ enabled: true
 # Worlds to keep regenerating, swept in order. region-dir is relative to the
 # server's world container. world_2024 and its nether/end are Paper custom
 # dimensions stored under the primary level's dimensions folder.
+#
+# Each world may optionally set its own min-age-days (or min-age-seconds) to be
+# rewilded on a faster or slower cycle than the global default below — e.g. a
+# fresher End. This only affects the age-based wilderness sweep; rare structures
+# and the End dragon reset on their own fast cycle regardless (see structure-reset).
 worlds:
   - name: world_2024
     region-dir: "world_2014/dimensions/minecraft/world_2024/region"
@@ -25,12 +30,15 @@ worlds:
     region-dir: "world_2014/dimensions/minecraft/world_2024_nether/region"
   - name: world_2024_the_end
     region-dir: "world_2014/dimensions/minecraft/world_2024_the_end/region"
+    min-age-days: 1    # End wilderness refreshes daily (dragon + end cities reset every 6h below)
 
 # Only regenerate chunks not accessed for at least this many days (region-file
 # last-saved time; updated whenever a chunk is loaded, i.e. a player was near).
-# 0 = ignore age. Our own regen resets the clock, so the world refreshes on a
-# rolling cycle of roughly this length.
-min-age-days: 30
+# 0 = ignore age. Our own regen resets the clock, so wilderness refreshes on a
+# rolling cycle of roughly this length. Rare structures reset far faster via the
+# separate structure-reset section below, so this can stay long. A world can
+# override this individually in the worlds list above.
+min-age-days: 90
 
 # Optional override for min-age-days with sub-day granularity (for testing or
 # tuning). >= 0 takes precedence over min-age-days; e.g. 600 = 10 minutes.
