@@ -47,7 +47,7 @@ import org.bukkit.scheduler.BukkitTask;
  *
  * <p>Regeneration is TPS-gated and bounded by a concurrency cap so players never
  * trigger mass on-demand generation. After all worlds are swept it waits
- * {@code rescan-interval-hours} and repeats. A manual {@code /wr region} command
+ * {@code sweep-interval} and repeats. A manual {@code /wr region} command
  * regenerates an arbitrary rectangle on demand (also two-phase).
  */
 public final class RegenEngine {
@@ -148,9 +148,6 @@ public final class RegenEngine {
         // worlds is shared with structure-reset, so it stays top-level; every other
         // resident-sweep knob lives under the resident-sweep section.
         skipUnchanged = c.getBoolean("resident-sweep.skip-unchanged-chunks", true);
-        // min-age-seconds (>= 0) is a global testing override forcing that age on
-        // every world; otherwise each world's own required min-age-days applies.
-        long overrideSecs = c.getLong("resident-sweep.min-age-seconds", -1L);
         worldEntries.clear();
         for (Map<?, ?> m : c.getMapList("worlds")) {
             Object n = m.get("name");
@@ -158,14 +155,11 @@ public final class RegenEngine {
                 continue;
             }
             String name = n.toString();
-            long minAge;
-            if (overrideSecs >= 0) {
-                minAge = overrideSecs;
-            } else if (m.get("min-age-days") instanceof Number d) {
-                minAge = Math.max(0L, d.longValue()) * 86400L;
-            } else {
-                plugin.getLogger().warning("World '" + name + "' has no min-age-days; skipping it "
-                        + "(set min-age-days on the world, or resident-sweep.min-age-seconds to force one).");
+            Object mv = m.get("min-age");
+            long minAge = Durations.seconds(mv == null ? null : mv.toString());
+            if (minAge < 0) {
+                plugin.getLogger().warning("World '" + name + "' has no valid min-age"
+                        + " (e.g. 90d, 6h, 1d12h); skipping it.");
                 continue;
             }
             Object rd = m.get("region-dir");
@@ -180,7 +174,7 @@ public final class RegenEngine {
         playerSafeRadius = Math.max(0, c.getInt("resident-sweep.player-safe-radius-chunks", 4));
         protectSpawnRadius = Math.max(0, c.getInt("resident-sweep.protect-spawn-radius-chunks", 0));
         maxConsecutiveFailures = Math.max(1, c.getInt("resident-sweep.max-consecutive-failures", 5));
-        sweepIntervalMs = Math.max(1L, c.getLong("resident-sweep.sweep-interval-hours", 24L)) * 3600_000L;
+        sweepIntervalMs = Durations.secondsOr(c.get("resident-sweep.sweep-interval"), 86400L) * 1000L;
         enabled = c.getBoolean("resident-sweep.enabled", false);
         autoResume = c.getBoolean("resident-sweep.auto-resume", true);
         respawnDragon = c.getBoolean("resident-sweep.respawn-dragon", false);
@@ -330,7 +324,7 @@ public final class RegenEngine {
         out.add("§7current TPS=§f" + String.format("%.2f", currentTps())
                 + " §7interval=§f" + intervalTicks + "t §7per-tick=§f" + perTick
                 + " §7in-flight=§f" + inFlight + "/" + maxConcurrent + " §7min-age=§f"
-                + (cur != null ? ageStr(cur.minAgeSeconds()) : "-"));
+                + (cur != null ? Durations.human(cur.minAgeSeconds()) : "-"));
         out.add("§7progress: §a" + completed + "§7 regen this sweep, tile §f" + regionPos + "§7/§f" + regionCount
                 + (regionCount > 0 ? " §7(" + String.format("%.1f", 100.0 * regionPos / regionCount) + "%)" : "")
                 + (tileActive ? " §7[" + (tileDeleting ? "del " + tileDelPos : "gen " + tileLoadPos)
@@ -380,7 +374,7 @@ public final class RegenEngine {
                     long c = countEligible(j.name(), j.regionDir(), j.spawnCx(), j.spawnCz(),
                             j.minAgeSeconds(), j.skipUnchanged());
                     grand += c;
-                    lines.add("§7  " + j.name() + ": §e" + c + " §7(min-age=" + ageStr(j.minAgeSeconds()) + ")");
+                    lines.add("§7  " + j.name() + ": §e" + c + " §7(min-age=" + Durations.human(j.minAgeSeconds()) + ")");
                 } catch (Throwable t) {
                     lines.add("§7  " + j.name() + ": §cscan failed " + t);
                 }
@@ -1230,13 +1224,6 @@ public final class RegenEngine {
     private static long readUInt32(byte[] a, int off) {
         return ((a[off] & 0xFFL) << 24) | ((a[off + 1] & 0xFFL) << 16)
                 | ((a[off + 2] & 0xFFL) << 8) | (a[off + 3] & 0xFFL);
-    }
-
-    private static String ageStr(long secs) {
-        if (secs >= 86400) return (secs / 86400L) + "d";
-        if (secs >= 3600) return (secs / 3600L) + "h";
-        if (secs >= 60) return (secs / 60L) + "m";
-        return secs + "s";
     }
 
     private String progressLine() {

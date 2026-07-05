@@ -4,20 +4,21 @@
 #   structure-reset — fast targeted reset of specific rare structures
 
 # Worlds both features operate on, swept in order. Each needs a name and a required
-# min-age-days: the age sweep regenerates a chunk once its region-file timestamp is
-# that many days old (that timestamp is bumped when the chunk is modified and saved
-# — built/broken/looted, or by our own regen — not by merely loading it). A world
-# missing min-age-days is skipped with a warning. The region directory is derived
-# from the loaded world via the Bukkit API (Paper custom dimensions like world_2024
-# resolve correctly); set region-dir, relative to the world container, only for a
+# min-age — a duration like 90d / 6h / 10m / 1d12h (units d/h/m/s, concatenable):
+# the age sweep regenerates a chunk once its region-file timestamp is that old (that
+# timestamp is bumped when the chunk is modified and saved — built/broken/looted, or
+# by our own regen — not by merely loading it). A world with a missing or malformed
+# min-age is skipped with a warning. The region directory is derived from the loaded
+# world via the Bukkit API (Paper custom dimensions like world_2024 resolve
+# correctly); set region-dir, relative to the world container, only for a
 # non-standard layout.
 worlds:
   - name: world_2024
-    min-age-days: 90
+    min-age: 90d
   - name: world_2024_nether
-    min-age-days: 30
+    min-age: 30d
   - name: world_2024_the_end
-    min-age-days: 1
+    min-age: 1d
 
 # ---------------------------------------------------------------------------
 # Resident wilderness sweep. Processes each world one region file at a time
@@ -32,10 +33,6 @@ resident-sweep:
   # Run automatically at boot. Off by default (it is the heavy part) — start it on
   # demand with /wr start. structure-reset below runs regardless of this.
   enabled: false
-
-  # Global testing override for the per-world min-age-days: >= 0 forces this age (in
-  # seconds) on every world; e.g. 600 = 10 minutes. -1 (default) = off.
-  min-age-seconds: -1
 
   # Skip regenerating any chunk that is unchanged since we last reset it — detected
   # by the region file's per-chunk timestamp still matching the one we stamped right
@@ -53,7 +50,7 @@ resident-sweep:
   respawn-dragon: true
 
   # After a full sweep of all worlds, wait this long before sweeping again.
-  sweep-interval-hours: 24
+  sweep-interval: 1h
 
   # TPS gate (Paper 1-minute average). Pause below tps-pause, resume at/above
   # tps-resume (hysteresis so it does not flap around 18).
@@ -92,16 +89,16 @@ resident-sweep:
 # player is currently in — and, when skip-unchanged-chunks is on, any unchanged since
 # its last reset, so only raided structures are refreshed.
 structure-reset:
-  # Reset shortly after boot, then on every wall-clock multiple of interval-hours past
-  # local midnight (e.g. 6 -> 00:00/06:00/12:00/18:00). It re-arms from the clock each
-  # cycle, so it stays aligned and never drifts.
+  # Reset shortly after boot, then on every wall-clock multiple of the interval past
+  # local midnight (e.g. 6h -> 00:00/06:00/12:00/18:00). It re-arms from the clock
+  # each cycle, so it stays aligned and never drifts.
   enabled: true
-  interval-hours: 6
+  interval: 6h
 
   # How often to re-scan region files for newly generated structures. The first scan
   # is a full pass (heavier, async); later scans only re-read chunks saved since, so
   # they are cheap.
-  rescan-hours: 168
+  rescan: 7d
 
   # Extra chunks added around each structure's footprint before regenerating.
   # Same-version regen needs no margin (0); raise only if edges look off.

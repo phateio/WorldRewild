@@ -38,7 +38,7 @@ final class StructureReset {
 
     // Config snapshot.
     private boolean enabled;
-    private long intervalHours;   // reset cadence; also the wall-clock alignment period
+    private long intervalSeconds; // reset cadence; also the wall-clock alignment period
     private long rescanTicks;
     private int margin;
     private final Set<String> types = new LinkedHashSet<>();
@@ -58,9 +58,9 @@ final class StructureReset {
     void reloadConfig() {
         var s = plugin.getConfig().getConfigurationSection("structure-reset");
         enabled = s == null || s.getBoolean("enabled", true);
-        intervalHours = s == null ? 6L : Math.max(1L, s.getLong("interval-hours", 6L));
-        long rescanHours = s == null ? 168L : Math.max(1L, s.getLong("rescan-hours", 168L));
-        rescanTicks = rescanHours * 3600L * 20L;
+        intervalSeconds = s == null ? 21600L : Durations.secondsOr(s.get("interval"), 21600L); // 6h
+        long rescanSec = s == null ? 604800L : Durations.secondsOr(s.get("rescan"), 604800L); // 7d
+        rescanTicks = rescanSec * 20L;
         margin = s == null ? 0 : Math.max(0, s.getInt("footprint-margin-chunks", 0));
         types.clear();
         List<String> cfgTypes = s == null ? List.of() : s.getStringList("types");
@@ -119,8 +119,8 @@ final class StructureReset {
     }
 
     /**
-     * Re-read config and re-arm the timers so interval-hours / rescan-hours /
-     * enabled changes take effect without a server restart. Does not force an
+     * Re-read config and re-arm the timers so interval / rescan / enabled changes
+     * take effect without a server restart. Does not force an
      * immediate reset — startTimers() just re-aligns to the next wall-clock
      * boundary. If the plugin is being enabled from a never-scanned state, scan
      * first so the registry is populated before the next reset fires. The caller
@@ -149,16 +149,16 @@ final class StructureReset {
     }
 
     /**
-     * Schedule the next reset at the next wall-clock multiple of interval-hours
-     * past local midnight (e.g. 6 -> 00:00/06:00/12:00/18:00), then re-arm itself
-     * from the fired callback. Computing the delay fresh each time keeps it aligned
-     * to the clock, so server-tick drift never accumulates.
+     * Schedule the next reset at the next wall-clock multiple of the interval past
+     * local midnight (e.g. 6h -> 00:00/06:00/12:00/18:00), then re-arm itself from
+     * the fired callback. Computing the delay fresh each time keeps it aligned to
+     * the clock, so server-tick drift never accumulates.
      */
     private void scheduleNextReset() {
         ZonedDateTime now = ZonedDateTime.now();
         ZonedDateTime midnight = now.truncatedTo(ChronoUnit.DAYS);
-        long hoursSince = Duration.between(midnight, now).toHours();
-        ZonedDateTime next = midnight.plusHours((hoursSince / intervalHours + 1) * intervalHours);
+        long secsSince = Duration.between(midnight, now).getSeconds();
+        ZonedDateTime next = midnight.plusSeconds((secsSince / intervalSeconds + 1) * intervalSeconds);
         long delayTicks = Math.max(1L, Duration.between(now, next).toMillis() / 50L);
         resetTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
             attemptReset("scheduled");
@@ -236,7 +236,7 @@ final class StructureReset {
         List<String> out = new ArrayList<>();
         out.add("§6[struct] §fenabled=§e" + enabled + " §7registry=§f" + scanner.size()
                 + (scanner.isScanning() ? " §c(scanning)" : "")
-                + " §7margin=§f" + margin + " §7interval=§f" + intervalHours + "h");
+                + " §7margin=§f" + margin + " §7interval=§f" + Durations.human(intervalSeconds));
         Map<String, Integer> counts = scanner.countsByType();
         if (counts.isEmpty()) {
             out.add("§7  (registry empty — run /wr struct scan)");

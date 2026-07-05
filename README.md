@@ -10,7 +10,7 @@ nobody has touched for a while:
 1. It sweeps a world one **region file at a time** (a "tile" = 32×32 chunks),
    nearest-to-spawn first. A chunk is eligible when its last-saved time (the
    region file's per-chunk timestamp — bumped when the chunk is modified and
-   saved, not by merely loading it) is older than `min-age-days`.
+   saved, not by merely loading it) is older than the world's `min-age`.
 2. Each tile is regenerated **two-phase**: first it deletes every eligible
    chunk's block/entity/POI data through Paper's **Moonrise** chunk system, then
    it reloads them so the server **regenerates each from scratch with the current
@@ -18,7 +18,7 @@ nobody has touched for a while:
 3. Work is **TPS-gated** and capped to a few concurrent regenerations, so it runs
    quietly in the background and players never trigger a burst of on-demand
    generation.
-4. After sweeping every configured world it waits `rescan-interval-hours` and
+4. After sweeping every configured world it waits `sweep-interval` and
    repeats.
 
 No FAWE / WorldEdit required. The resident sweep is **off by default**
@@ -37,7 +37,7 @@ re-regenerated on every cycle forever — most wastefully in the End, whose vast
 empty void would otherwise be re-reset daily. Chunks we have never reset have no
 stamp and stay eligible, so the **first-pass cross-version conversion still sweeps
 the whole map once**; after that, untouched wilderness goes dormant and only the
-areas players actually change keep refreshing (on the `min-age-days` cycle).
+areas players actually change keep refreshing (on the `min-age` cycle).
 
 ### Renewing the End dragon
 
@@ -105,20 +105,20 @@ be DataFixer-upgraded, never truly regenerated.
 
 ## Configuration
 
-See [`config.yml`](config.yml). Both features share a top-level `worlds` list —
-each entry is a name plus a **required** `min-age-days` (a world missing it is
-skipped), optionally with a `region-dir` override (else derived from the loaded
-world).
+See [`config.yml`](config.yml). Time values are durations — `90d` / `6h` / `10m` /
+`1d12h` (units d/h/m/s, concatenable). Both features share a top-level `worlds`
+list — each entry is a name plus a **required** `min-age` duration (a world missing
+or malforming it is skipped), optionally with a `region-dir` override (else derived
+from the loaded world).
 
-`resident-sweep`: `enabled` (default false), `min-age-seconds` (global testing
-override forcing that age on all worlds; -1 = off), `skip-unchanged-chunks`
-(default true; see above), `respawn-dragon` (renew the End dragon after its sweep
-pass), `sweep-interval-hours`, `tps-pause` / `tps-resume`, `interval-ticks` /
-`per-tick` / `max-concurrent-regens`, `player-safe-radius-chunks`,
-`protect-spawn-radius-chunks`, `max-consecutive-failures`, `auto-resume`.
+`resident-sweep`: `enabled` (default false), `skip-unchanged-chunks` (default true;
+see above), `respawn-dragon` (renew the End dragon after its sweep pass),
+`sweep-interval`, `tps-pause` / `tps-resume`, `interval-ticks` / `per-tick` /
+`max-concurrent-regens`, `player-safe-radius-chunks`, `protect-spawn-radius-chunks`,
+`max-consecutive-failures`, `auto-resume`.
 
-`structure-reset`: `enabled`, `interval-hours` (default 6, wall-clock aligned),
-`rescan-hours` (registry refresh), `footprint-margin-chunks`, `types`.
+`structure-reset`: `enabled`, `interval` (default 6h, wall-clock aligned), `rescan`
+(registry refresh), `footprint-margin-chunks`, `types`.
 
 ## Building
 
