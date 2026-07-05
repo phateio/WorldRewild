@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -22,6 +23,7 @@ import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.boss.DragonBattle;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -40,8 +42,8 @@ import org.bukkit.scheduler.BukkitTask;
  * saved. Deleting the whole tile first means interior chunks regenerate with no
  * old neighbours, so a cross-version map (e.g. 1.21.11 -> 26.2) actually converts
  * instead of being blended back toward the old terrain by the worldgen Blender.
- * A thin biome-only rim on tile edges that still border old chunks heals on the
- * next rolling re-sweep, once those neighbours have themselves been converted.
+ * A thin biome-only rim on tile edges that still border old chunks heals the next
+ * time that area is swept, once those neighbours have themselves been converted.
  *
  * <p>Regeneration is TPS-gated and bounded by a concurrency cap so players never
  * trigger mass on-demand generation. After all worlds are swept it waits
@@ -56,8 +58,17 @@ public final class RegenEngine {
     private static final int HEADER_BYTES = 8192; // 4 KiB location table + 4 KiB timestamps
     private static final int SLOTS = 1024;        // 32x32 chunk slots per region file
     private static final int[] EMPTY = new int[0];
+    private static final byte[] NO_HEADER = new byte[0]; // sentinel: region file absent/unreadable
+    // A reset chunk's own post-reset save finalises up to a second or two after we
+    // record its stamp (async), so stamp a bit into the future to stay at/above that
+    // save's timestamp — otherwise the chunk looks "changed" forever. No unoccupied
+    // chunk is legitimately modified within this window.
+    private static final long STAMP_MARGIN_SECONDS = 60L;
 
-    private record WorldEntry(String name, File regionDir, long minAgeSeconds) {}
+    // regionDirOverride is the configured region-dir, or null to derive it from
+    // the loaded world's folder (the normal case). minAgeSeconds is the resolved
+    // per-world age threshold.
+    private record WorldEntry(String name, File regionDirOverride, long minAgeSeconds) {}
 
     /** A chunk rectangle (inclusive) to regenerate as one box of a batch. */
     record Box(World world, int minCx, int minCz, int maxCx, int maxCz) {}
@@ -81,10 +92,11 @@ public final class RegenEngine {
     private int playerSafeRadius;
     private int protectSpawnRadius;
     private int maxConsecutiveFailures;
-    private long minAgeSeconds;
-    private long rescanIntervalMs;
+    private long sweepIntervalMs;
     private boolean enabled;
     private boolean autoResume;
+    private boolean skipUnchanged;   // global: reset a chunk only once it changed since our last reset
+    private boolean respawnDragon;   // reset the End dragon after an End world's sweep pass
 
     // Runtime state.
     private volatile State state = State.STOPPED;
@@ -116,10 +128,15 @@ public final class RegenEngine {
     private int tileDelPos = 0;
     private int tileLoadPos = 0;
 
+    // Per-chunk "reset stamp" sidecar used to skip chunks unchanged since our
+    // last reset (see ResetStamps).
+    private final ResetStamps stamps;
+
     RegenEngine(WorldRewild plugin) {
         this.plugin = plugin;
         this.targetsFile = new File(plugin.getDataFolder(), "targets.bin");
         this.stateFile = new File(plugin.getDataFolder(), "state.properties");
+        this.stamps = new ResetStamps(plugin);
     }
 
     // ------------------------------------------------------------------ config
@@ -128,51 +145,52 @@ public final class RegenEngine {
         plugin.reloadConfig();
         var c = plugin.getConfig();
         File container = plugin.getServer().getWorldContainer();
-        // Global default age threshold. min-age-seconds (when >= 0) overrides
-        // min-age-days, for sub-day tuning/testing.
-        long secs = c.getLong("min-age-seconds", -1L);
-        minAgeSeconds = secs >= 0 ? secs : Math.max(0, c.getInt("min-age-days", 90)) * 86400L;
+        // worlds is shared with structure-reset, so it stays top-level; every other
+        // resident-sweep knob lives under the resident-sweep section.
+        skipUnchanged = c.getBoolean("resident-sweep.skip-unchanged-chunks", true);
+        // min-age-seconds (>= 0) is a global testing override forcing that age on
+        // every world; otherwise each world's own required min-age-days applies.
+        long overrideSecs = c.getLong("resident-sweep.min-age-seconds", -1L);
         worldEntries.clear();
         for (Map<?, ?> m : c.getMapList("worlds")) {
             Object n = m.get("name");
-            Object rd = m.get("region-dir");
-            if (n != null && rd != null) {
-                worldEntries.add(new WorldEntry(n.toString(), new File(container, rd.toString()),
-                        resolveMinAge(m, minAgeSeconds)));
+            if (n == null) {
+                continue;
             }
+            String name = n.toString();
+            long minAge;
+            if (overrideSecs >= 0) {
+                minAge = overrideSecs;
+            } else if (m.get("min-age-days") instanceof Number d) {
+                minAge = Math.max(0L, d.longValue()) * 86400L;
+            } else {
+                plugin.getLogger().warning("World '" + name + "' has no min-age-days; skipping it "
+                        + "(set min-age-days on the world, or resident-sweep.min-age-seconds to force one).");
+                continue;
+            }
+            Object rd = m.get("region-dir");
+            File override = rd != null ? new File(container, rd.toString()) : null;
+            worldEntries.add(new WorldEntry(name, override, minAge));
         }
-        tpsPause = c.getDouble("tps-pause", 18.0);
-        tpsResume = c.getDouble("tps-resume", 18.5);
-        intervalTicks = Math.max(1L, c.getLong("interval-ticks", 2L));
-        perTick = Math.max(1, c.getInt("per-tick", 4));
-        maxConcurrent = Math.max(1, c.getInt("max-concurrent-regens", 4));
-        playerSafeRadius = Math.max(0, c.getInt("player-safe-radius-chunks", 4));
-        protectSpawnRadius = Math.max(0, c.getInt("protect-spawn-radius-chunks", 0));
-        maxConsecutiveFailures = Math.max(1, c.getInt("max-consecutive-failures", 5));
-        rescanIntervalMs = Math.max(1L, c.getLong("rescan-interval-hours", 24L)) * 3600_000L;
-        enabled = c.getBoolean("enabled", true);
-        autoResume = c.getBoolean("auto-resume", true);
-    }
-
-    /**
-     * Age threshold for one world: its own {@code min-age-seconds} (>= 0) or
-     * {@code min-age-days} overrides the global default, so a world can be rewilded
-     * on a faster or slower cycle than the rest (e.g. a fresher End).
-     */
-    private static long resolveMinAge(Map<?, ?> m, long globalSeconds) {
-        if (m.get("min-age-seconds") instanceof Number s && s.longValue() >= 0) {
-            return s.longValue();
-        }
-        if (m.get("min-age-days") instanceof Number d) {
-            return Math.max(0L, d.longValue()) * 86400L;
-        }
-        return globalSeconds;
+        tpsPause = c.getDouble("resident-sweep.tps-pause", 18.0);
+        tpsResume = c.getDouble("resident-sweep.tps-resume", 18.5);
+        intervalTicks = Math.max(1L, c.getLong("resident-sweep.interval-ticks", 2L));
+        perTick = Math.max(1, c.getInt("resident-sweep.per-tick", 4));
+        maxConcurrent = Math.max(1, c.getInt("resident-sweep.max-concurrent-regens", 4));
+        playerSafeRadius = Math.max(0, c.getInt("resident-sweep.player-safe-radius-chunks", 4));
+        protectSpawnRadius = Math.max(0, c.getInt("resident-sweep.protect-spawn-radius-chunks", 0));
+        maxConsecutiveFailures = Math.max(1, c.getInt("resident-sweep.max-consecutive-failures", 5));
+        sweepIntervalMs = Math.max(1L, c.getLong("resident-sweep.sweep-interval-hours", 24L)) * 3600_000L;
+        enabled = c.getBoolean("resident-sweep.enabled", false);
+        autoResume = c.getBoolean("resident-sweep.auto-resume", true);
+        respawnDragon = c.getBoolean("resident-sweep.respawn-dragon", false);
     }
 
     // --------------------------------------------------------------- lifecycle
 
     void onEnable() {
         reloadConfig();
+        stamps.load();
         loadState();
         if (state == State.RUNNING || state == State.PAUSED) {
             if (autoResume && worldIndex < worldEntries.size() && loadTargets()) {
@@ -298,6 +316,7 @@ public final class RegenEngine {
         nextSweepEpochMs = 0;
         targetsFile.delete();
         stateFile.delete();
+        stamps.clear();
         return "Progress cleared. Next /wr start rescans from scratch.";
     }
 
@@ -311,7 +330,7 @@ public final class RegenEngine {
         out.add("§7current TPS=§f" + String.format("%.2f", currentTps())
                 + " §7interval=§f" + intervalTicks + "t §7per-tick=§f" + perTick
                 + " §7in-flight=§f" + inFlight + "/" + maxConcurrent + " §7min-age=§f"
-                + ageStr(cur != null ? cur.minAgeSeconds() : minAgeSeconds));
+                + (cur != null ? ageStr(cur.minAgeSeconds()) : "-"));
         out.add("§7progress: §a" + completed + "§7 regen this sweep, tile §f" + regionPos + "§7/§f" + regionCount
                 + (regionCount > 0 ? " §7(" + String.format("%.1f", 100.0 * regionPos / regionCount) + "%)" : "")
                 + (tileActive ? " §7[" + (tileDeleting ? "del " + tileDelPos : "gen " + tileLoadPos)
@@ -327,7 +346,8 @@ public final class RegenEngine {
         return out;
     }
 
-    private record CountJob(String name, File regionDir, int spawnCx, int spawnCz, long minAgeSeconds) {}
+    private record CountJob(String name, File regionDir, int spawnCx, int spawnCz, long minAgeSeconds,
+                            boolean skipUnchanged) {}
 
     /** Dry scan: report eligible chunk counts per configured world, without starting. */
     void cmdCount(CommandSender sender) {
@@ -339,11 +359,11 @@ public final class RegenEngine {
         for (WorldEntry e : worldEntries) {
             World w = getWorld(e.name());
             if (w == null) {
-                jobs.add(new CountJob(e.name(), null, 0, 0, e.minAgeSeconds()));
+                jobs.add(new CountJob(e.name(), null, 0, 0, e.minAgeSeconds(), skipUnchanged));
             } else {
                 Location s = w.getSpawnLocation();
-                jobs.add(new CountJob(e.name(), e.regionDir(), s.getBlockX() >> 4, s.getBlockZ() >> 4,
-                        e.minAgeSeconds()));
+                jobs.add(new CountJob(e.name(), regionDir(e, w), s.getBlockX() >> 4, s.getBlockZ() >> 4,
+                        e.minAgeSeconds(), skipUnchanged));
             }
         }
         sender.sendMessage("§6[count] §fscanning " + jobs.size() + " world(s), protect-spawn="
@@ -357,7 +377,8 @@ public final class RegenEngine {
                     continue;
                 }
                 try {
-                    long c = countEligible(j.regionDir(), j.spawnCx(), j.spawnCz(), j.minAgeSeconds());
+                    long c = countEligible(j.name(), j.regionDir(), j.spawnCx(), j.spawnCz(),
+                            j.minAgeSeconds(), j.skipUnchanged());
                     grand += c;
                     lines.add("§7  " + j.name() + ": §e" + c + " §7(min-age=" + ageStr(j.minAgeSeconds()) + ")");
                 } catch (Throwable t) {
@@ -391,7 +412,7 @@ public final class RegenEngine {
             return;
         }
         long cells = (long) (maxCx - minCx + 1) * (maxCz - minCz + 1);
-        boolean started = runBatch(List.of(new Box(w, minCx, minCz, maxCx, maxCz)), null,
+        boolean started = runBatch(List.of(new Box(w, minCx, minCz, maxCx, maxCz)), false, null,
                 () -> sender.sendMessage("§6[region] §fdone regenerating " + cells + " chunks in " + worldName + "."));
         sender.sendMessage(started
                 ? "§6[region] §fregenerating " + cells + " chunks in " + worldName + " (two-phase)..."
@@ -406,9 +427,11 @@ public final class RegenEngine {
      * with a nearby player or already loaded), flush, then reload the deleted
      * ones so they regenerate — TPS-gated and concurrency-capped. {@code onBoxDone}
      * runs after each box's chunks are regenerated; {@code onDone} at the very end.
+     * When {@code recordStamps} is true, each box's regenerated chunks are stamped
+     * afterwards (so the age sweep treats them as unchanged until touched again).
      * Returns false (starting nothing) if a batch is already running or empty.
      */
-    boolean runBatch(List<Box> boxes, IntConsumer onBoxDone, Runnable onDone) {
+    boolean runBatch(List<Box> boxes, boolean recordStamps, IntConsumer onBoxDone, Runnable onDone) {
         if (busy || boxes.isEmpty()) {
             return false;
         }
@@ -487,6 +510,9 @@ public final class RegenEngine {
                     if (loadPos >= deleted.size()) {
                         if (inFlight == 0) {
                             flushQuietly(w);
+                            if (recordStamps && skipUnchanged) {
+                                recordStampsForChunks(w, deleted);
+                            }
                             if (onBoxDone != null) {
                                 onBoxDone.accept(bi);
                             }
@@ -520,6 +546,50 @@ public final class RegenEngine {
             }
         }
         return false;
+    }
+
+    // ------------------------------------------------------------- End dragon
+
+    /**
+     * Reset the End dragon fight's saved state so a fresh dragon can spawn again.
+     * Fired after this world's age-sweep pass (which regenerates the central island
+     * and removes the exit portal / end gateways) — the fight then re-derives
+     * "previously killed" from those now-cleared blocks on the next player entry.
+     * Only resets flags, no blocks. Skips if there is no fight here, a dragon is
+     * already alive, or (unless {@code force}) a player is currently in the End.
+     */
+    private boolean resetEndDragon(World w, boolean force) {
+        if (w == null || (!force && !w.getPlayers().isEmpty())) {
+            return false;
+        }
+        try {
+            DragonBattle db = w.getEnderDragonBattle();
+            if (db == null || db.getEnderDragon() != null) {
+                return false; // no fight in this world, or a dragon is already alive
+            }
+            db.setPreviouslyKilled(false);
+            if (VanillaRegen.forceEndRescan(w)) {
+                plugin.getLogger().info("End dragon fight state reset in " + w.getName()
+                        + "; a fresh dragon spawns once the central island is regenerated and a player enters.");
+                return true;
+            }
+        } catch (Throwable t) {
+            plugin.getLogger().warning("Dragon reset failed: " + t);
+        }
+        return false;
+    }
+
+    /** {@code /wr end reset}: force a dragon-fight reset on the End world(s) in the sweep list. */
+    void cmdEndReset(CommandSender sender) {
+        boolean any = false;
+        for (WorldEntry e : worldEntries) {
+            if (resetEndDragon(getWorld(e.name()), true)) {
+                any = true;
+            }
+        }
+        sender.sendMessage(any
+                ? "§6[end] §fEnd dragon fight reset; a fresh dragon spawns when a player enters the End."
+                : "§c[end] cannot reset: no End world loaded, a dragon is already alive, or no fight present.");
     }
 
     /** Manually regenerate a single chunk immediately (proactive). */
@@ -638,10 +708,17 @@ public final class RegenEngine {
     }
 
     private void advanceWorld() {
+        // The world that just finished its pass may have cleared the End arena
+        // (exit portal / gateways) — reset the dragon fight now so a fresh one can
+        // spawn on the next entry. resetEndDragon no-ops unless this world has a
+        // dragon fight, so it self-limits to the End.
+        if (respawnDragon && cur != null) {
+            resetEndDragon(getWorld(cur.name()), false);
+        }
         worldIndex++;
         if (worldIndex >= worldEntries.size()) {
             state = State.WAITING;
-            nextSweepEpochMs = System.currentTimeMillis() + rescanIntervalMs;
+            nextSweepEpochMs = System.currentTimeMillis() + sweepIntervalMs;
             cur = null;
             regions = null;
             regionCount = 0;
@@ -650,7 +727,7 @@ public final class RegenEngine {
             targetsFile.delete();
             persist();
             plugin.getLogger().info("Full sweep complete (" + completed + " chunks regenerated). "
-                    + "Next sweep in " + (rescanIntervalMs / 3600_000L) + "h.");
+                    + "Next sweep in " + (sweepIntervalMs / 3600_000L) + "h.");
             return;
         }
         scanWorldAndRun();
@@ -668,9 +745,10 @@ public final class RegenEngine {
             advanceWorld();
             return;
         }
-        if (!cur.regionDir().isDirectory()) {
+        File rd = regionDir(cur, w);
+        if (!rd.isDirectory()) {
             plugin.getLogger().warning("Region dir missing for " + cur.name() + ": "
-                    + cur.regionDir().getAbsolutePath() + "; skipping.");
+                    + rd.getAbsolutePath() + "; skipping.");
             advanceWorld();
             return;
         }
@@ -678,13 +756,14 @@ public final class RegenEngine {
         scanning = true;
         final int spawnCx = curSpawnCx;
         final int spawnCz = curSpawnCz;
-        final File rd = cur.regionDir();
+        final File rdFinal = rd;
         final String name = cur.name();
         final long minAge = cur.minAgeSeconds();
+        final boolean skipUnchanged = this.skipUnchanged;
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             int[] built;
             try {
-                built = listRegions(rd, spawnCx, spawnCz, minAge);
+                built = listRegions(name, rdFinal, spawnCx, spawnCz, minAge, skipUnchanged);
             } catch (Throwable t) {
                 plugin.getLogger().severe("Scan failed for " + name + ": " + t);
                 built = EMPTY;
@@ -732,9 +811,15 @@ public final class RegenEngine {
         return true;
     }
 
-    /** Is slot {@code i} (0..1023) present on disk, past min-age, and outside the spawn guard? */
+    /**
+     * Is slot {@code i} (0..1023) present on disk, past min-age, outside the
+     * spawn guard, and — when {@code skipUnchanged} is on — changed since we last
+     * reset it (its live timestamp advanced past its reset stamp)? {@code stamp}
+     * is the region's per-slot reset stamps (null = none recorded, i.e. never
+     * reset by us, so the chunk always counts as changed and passes).
+     */
     private boolean isEligible(byte[] header, int i, int rx, int rz, int spawnCx, int spawnCz,
-                              long nowSec, long minAge) {
+                              long nowSec, long minAge, boolean skipUnchanged, int[] stamp) {
         int b = i * 4;
         if ((header[b] | header[b + 1] | header[b + 2] | header[b + 3]) == 0) {
             return false; // no chunk stored in this slot
@@ -746,17 +831,22 @@ public final class RegenEngine {
                 return false;
             }
         }
-        if (minAge > 0) {
-            long ts = readUInt32(header, 4096 + b);
-            if (ts > 0 && (nowSec - ts) < minAge) {
-                return false;
+        long ts = readUInt32(header, 4096 + b);
+        if (minAge > 0 && ts > 0 && (nowSec - ts) < minAge) {
+            return false; // touched too recently to rewild
+        }
+        if (skipUnchanged) {
+            long reset = stamp == null ? 0L : (stamp[i] & 0xFFFFFFFFL);
+            if (ts <= reset) {
+                return false; // unchanged since our last reset — nothing has modified it
             }
         }
         return true;
     }
 
     /** Region files with at least one eligible chunk, packed [rx,rz,...] nearest-to-spawn first. */
-    private int[] listRegions(File regionDir, int spawnCx, int spawnCz, long minAge) throws IOException {
+    private int[] listRegions(String world, File regionDir, int spawnCx, int spawnCz, long minAge,
+                              boolean skipUnchanged) throws IOException {
         List<long[]> regs = new ArrayList<>();
         long now = System.currentTimeMillis() / 1000L;
         byte[] header = new byte[HEADER_BYTES];
@@ -764,8 +854,9 @@ public final class RegenEngine {
             if (!readHeader(f, header)) {
                 return;
             }
+            int[] stamp = skipUnchanged ? stamps.region(world, rx, rz) : null;
             for (int i = 0; i < SLOTS; i++) {
-                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge)) {
+                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge, skipUnchanged, stamp)) {
                     long dx = (long) (rx * 32 + 16) - spawnCx;
                     long dz = (long) (rz * 32 + 16) - spawnCz;
                     regs.add(new long[]{dx * dx + dz * dz, rx, rz});
@@ -786,16 +877,18 @@ public final class RegenEngine {
     }
 
     /** Eligible chunks within one region file, packed [cx,cz,...]. */
-    private int[] scanTile(File regionDir, int rx, int rz, int spawnCx, int spawnCz, long minAge) throws IOException {
+    private int[] scanTile(String world, File regionDir, int rx, int rz, int spawnCx, int spawnCz,
+                           long minAge, boolean skipUnchanged) throws IOException {
         byte[] header = new byte[HEADER_BYTES];
         if (!readHeader(new File(regionDir, "r." + rx + "." + rz + ".mca"), header)) {
             return EMPTY;
         }
         long now = System.currentTimeMillis() / 1000L;
+        int[] stamp = skipUnchanged ? stamps.region(world, rx, rz) : null;
         int[] buf = new int[SLOTS * 2]; // worst case: every slot eligible
         int k = 0;
         for (int i = 0; i < SLOTS; i++) {
-            if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge)) {
+            if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge, skipUnchanged, stamp)) {
                 buf[k++] = rx * 32 + (i & 31);
                 buf[k++] = rz * 32 + (i >> 5);
             }
@@ -804,7 +897,8 @@ public final class RegenEngine {
     }
 
     /** Count eligible chunks across all region files in a world (for /wr count). */
-    private long countEligible(File regionDir, int spawnCx, int spawnCz, long minAge) throws IOException {
+    private long countEligible(String world, File regionDir, int spawnCx, int spawnCz, long minAge,
+                               boolean skipUnchanged) throws IOException {
         long now = System.currentTimeMillis() / 1000L;
         byte[] header = new byte[HEADER_BYTES];
         long[] count = {0L};
@@ -812,8 +906,9 @@ public final class RegenEngine {
             if (!readHeader(f, header)) {
                 return;
             }
+            int[] stamp = skipUnchanged ? stamps.region(world, rx, rz) : null;
             for (int i = 0; i < SLOTS; i++) {
-                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge)) {
+                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge, skipUnchanged, stamp)) {
                     count[0]++;
                 }
             }
@@ -879,7 +974,8 @@ public final class RegenEngine {
         int rz = regions[2 * regionPos + 1];
         int[] chunks;
         try {
-            chunks = scanTile(cur.regionDir(), rx, rz, curSpawnCx, curSpawnCz, cur.minAgeSeconds());
+            chunks = scanTile(cur.name(), regionDir(cur, w), rx, rz, curSpawnCx, curSpawnCz,
+                    cur.minAgeSeconds(), skipUnchanged);
         } catch (Throwable t) {
             plugin.getLogger().warning("Tile scan failed r." + rx + "." + rz + ": " + t);
             chunks = EMPTY;
@@ -952,10 +1048,114 @@ public final class RegenEngine {
         }
         if (tileLoadPos >= tileN && inFlight == 0) {
             flushQuietly(w);
+            if (skipUnchanged) {
+                recordResetStamps(w);
+            }
             regionPos++;
             tileActive = false;
             persist();
         }
+    }
+
+    /** Stamp the chunks the resident sweep just reset in the current tile. */
+    private void recordResetStamps(World w) {
+        List<int[]> reset = new ArrayList<>();
+        for (int i = 0; i < tileN; i++) {
+            if (tileDeleted[i]) {
+                reset.add(new int[]{tileChunks[2 * i], tileChunks[2 * i + 1]});
+            }
+        }
+        recordStampsForChunks(w, reset);
+    }
+
+    /**
+     * After a reset, stamp every regenerated chunk (grouped by region file, which a
+     * box may span) so a later scan treats it as unchanged — and skips it — until
+     * its region timestamp advances past the stamp, i.e. a player has since modified
+     * it. Stamp with {@code now + STAMP_MARGIN_SECONDS}, not the region timestamp
+     * read back from disk: the chunk's own post-reset save finalises a second or two
+     * later (async), so a stamp at read time sits just below that save and makes the
+     * chunk look changed forever.
+     */
+    private void recordStampsForChunks(World w, List<int[]> chunks) {
+        if (chunks.isEmpty()) {
+            return;
+        }
+        int stampTs = (int) (System.currentTimeMillis() / 1000L + STAMP_MARGIN_SECONDS);
+        Map<Long, List<int[]>> byRegion = new HashMap<>();
+        for (int[] c : chunks) {
+            byRegion.computeIfAbsent(regionKey(c[0] >> 5, c[1] >> 5), k -> new ArrayList<>()).add(c);
+        }
+        for (Map.Entry<Long, List<int[]>> en : byRegion.entrySet()) {
+            int rx = (int) (en.getKey() >> 32);
+            int rz = (int) (long) en.getKey();
+            int[] freshTs = new int[SLOTS];
+            boolean[] mask = new boolean[SLOTS];
+            for (int[] c : en.getValue()) {
+                int slot = (c[0] & 31) | ((c[1] & 31) << 5);
+                mask[slot] = true;
+                freshTs[slot] = stampTs;
+            }
+            stamps.update(w.getName(), rx, rz, freshTs, mask);
+        }
+    }
+
+    /**
+     * Whether any chunk in a box has changed (its block-region timestamp advanced
+     * past its reset stamp) since we last reset it — the same signal the age sweep
+     * uses, letting structure reset skip structures nobody has touched. Returns
+     * true (reset it) when skip-unchanged is off, or when a footprint chunk has no
+     * stamp yet (never reset by us). Reads region headers off disk.
+     */
+    boolean boxChanged(World w, int minCx, int minCz, int maxCx, int maxCz) {
+        if (!skipUnchanged) {
+            return true;
+        }
+        File dir = regionDir(w);
+        Map<Long, byte[]> headers = new HashMap<>();
+        for (int cz = minCz; cz <= maxCz; cz++) {
+            for (int cx = minCx; cx <= maxCx; cx++) {
+                int rx = cx >> 5;
+                int rz = cz >> 5;
+                byte[] header = headers.computeIfAbsent(regionKey(rx, rz), k -> {
+                    byte[] h = new byte[HEADER_BYTES];
+                    try {
+                        return readHeader(new File(dir, "r." + rx + "." + rz + ".mca"), h) ? h : NO_HEADER;
+                    } catch (IOException e) {
+                        return NO_HEADER;
+                    }
+                });
+                if (header == NO_HEADER) {
+                    continue;
+                }
+                int slot = (cx & 31) | ((cz & 31) << 5);
+                int b = slot * 4;
+                if ((header[b] | header[b + 1] | header[b + 2] | header[b + 3]) == 0) {
+                    continue; // no chunk stored here
+                }
+                long ts = readUInt32(header, 4096 + b);
+                int[] stamp = stamps.region(w.getName(), rx, rz);
+                long s = stamp == null ? 0L : (stamp[slot] & 0xFFFFFFFFL);
+                if (ts > s) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static long regionKey(int rx, int rz) {
+        return ((long) rx << 32) | (rz & 0xFFFFFFFFL);
+    }
+
+    /** Region dir for a world by name: the configured override if any, else derived. */
+    private File regionDir(World w) {
+        for (WorldEntry e : worldEntries) {
+            if (e.name().equals(w.getName())) {
+                return regionDir(e, w);
+            }
+        }
+        return new File(w.getWorldFolder(), "region");
     }
 
     private void autoPause(Throwable t) {
@@ -994,6 +1194,16 @@ public final class RegenEngine {
             curSpawnCx = s.getBlockX() >> 4;
             curSpawnCz = s.getBlockZ() >> 4;
         }
+    }
+
+    /**
+     * The region directory for a world: the configured {@code region-dir} override
+     * if set, otherwise derived from the loaded world's folder via the Bukkit API
+     * ({@code World.getWorldFolder()} resolves custom dimensions correctly, e.g.
+     * {@code world_2014/dimensions/minecraft/world_2024}). Needs the world loaded.
+     */
+    private static File regionDir(WorldEntry e, World w) {
+        return e.regionDirOverride() != null ? e.regionDirOverride() : new File(w.getWorldFolder(), "region");
     }
 
     private boolean playerNear(World w, int cx, int cz) {

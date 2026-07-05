@@ -33,15 +33,14 @@ final class StructureScanner {
     /** A registered structure, or the synthetic End central-island entry. */
     static final class Entry {
         final String world;
-        final String type;        // e.g. "mansion", or "end_central"
+        final String type;        // e.g. "mansion"
         final int startCx;
         final int startCz;
         int minCx, minCz, maxCx, maxCz;   // chunk footprint (inclusive)
         long lastReset;           // epoch millis of our last reset (0 = never)
-        final boolean endCentral;
 
         Entry(String world, String type, int startCx, int startCz,
-              int minCx, int minCz, int maxCx, int maxCz, long lastReset, boolean endCentral) {
+              int minCx, int minCz, int maxCx, int maxCz, long lastReset) {
             this.world = world;
             this.type = type;
             this.startCx = startCx;
@@ -51,7 +50,6 @@ final class StructureScanner {
             this.maxCx = maxCx;
             this.maxCz = maxCz;
             this.lastReset = lastReset;
-            this.endCentral = endCentral;
         }
 
         String key() {
@@ -166,7 +164,7 @@ final class StructureScanner {
                         registry.put(e.key(), e);
                     }
                 }
-                registry.values().removeIf(e -> !e.endCentral && !types.contains(e.type));
+                registry.values().removeIf(e -> !types.contains(e.type));
                 lastScanEpochSec = nowSec;
                 save();
                 total = registry.size();
@@ -284,7 +282,7 @@ final class StructureScanner {
                 maxCx = maxX >> 4;
                 maxCz = maxZ >> 4;
             }
-            out.add(new Entry(world, shortId, startCx, startCz, minCx, minCz, maxCx, maxCz, 0, false));
+            out.add(new Entry(world, shortId, startCx, startCz, minCx, minCz, maxCx, maxCz, 0));
         }
     }
 
@@ -319,12 +317,12 @@ final class StructureScanner {
                     continue;
                 }
                 String[] p = line.split("\t");
-                if (p.length < 10) {
-                    continue;
+                if (p.length < 9) {
+                    continue; // (a trailing 10th column from older files is simply ignored)
                 }
                 Entry e = new Entry(p[0], p[1], Integer.parseInt(p[2]), Integer.parseInt(p[3]),
                         Integer.parseInt(p[4]), Integer.parseInt(p[5]), Integer.parseInt(p[6]),
-                        Integer.parseInt(p[7]), Long.parseLong(p[8]), "1".equals(p[9]));
+                        Integer.parseInt(p[7]), Long.parseLong(p[8]));
                 registry.put(e.key(), e);
             }
         } catch (Exception e) {
@@ -340,7 +338,7 @@ final class StructureScanner {
                         Integer.toString(e.startCx), Integer.toString(e.startCz),
                         Integer.toString(e.minCx), Integer.toString(e.minCz),
                         Integer.toString(e.maxCx), Integer.toString(e.maxCz),
-                        Long.toString(e.lastReset), e.endCentral ? "1" : "0"));
+                        Long.toString(e.lastReset)));
             }
         } catch (IOException e) {
             plugin.getLogger().warning("Failed to save structures.tsv: " + e);

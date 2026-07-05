@@ -11,7 +11,6 @@ import java.util.Map;
 import java.util.Set;
 
 import org.bukkit.World;
-import org.bukkit.boss.DragonBattle;
 import org.bukkit.command.CommandSender;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -43,8 +42,6 @@ final class StructureReset {
     private long rescanTicks;
     private int margin;
     private final Set<String> types = new LinkedHashSet<>();
-    private String endWorld;
-    private boolean respawnDragon;
 
     private BukkitTask resetTask;
     private BukkitTask rescanTask;
@@ -68,20 +65,35 @@ final class StructureReset {
         types.clear();
         List<String> cfgTypes = s == null ? List.of() : s.getStringList("types");
         types.addAll(cfgTypes.isEmpty() ? DEFAULT_TYPES : cfgTypes);
-        endWorld = s == null ? null : s.getString("end-central.world", null);
-        respawnDragon = s == null || s.getBoolean("end-central.respawn-dragon", true);
     }
 
-    /** The worlds to scan for structures, taken from the top-level {@code worlds} list. */
+    /**
+     * The worlds to scan for structures, taken from the top-level {@code worlds}
+     * list. The region directory is the configured {@code region-dir} override if
+     * set, else derived from the loaded world's folder (a world with no override
+     * that is not loaded is skipped — it cannot be resolved).
+     */
     private List<WorldDir> worldDirs() {
         File container = plugin.getServer().getWorldContainer();
         List<WorldDir> out = new ArrayList<>();
         for (Map<?, ?> m : plugin.getConfig().getMapList("worlds")) {
             Object n = m.get("name");
-            Object rd = m.get("region-dir");
-            if (n != null && rd != null) {
-                out.add(new WorldDir(n.toString(), new File(container, rd.toString())));
+            if (n == null) {
+                continue;
             }
+            String name = n.toString();
+            Object rd = m.get("region-dir");
+            File dir;
+            if (rd != null) {
+                dir = new File(container, rd.toString());
+            } else {
+                World w = plugin.getServer().getWorld(name);
+                if (w == null) {
+                    continue; // no override and world not loaded — can't derive its region dir
+                }
+                dir = new File(w.getWorldFolder(), "region");
+            }
+            out.add(new WorldDir(name, dir));
         }
         return out;
     }
@@ -170,17 +182,21 @@ final class StructureReset {
     // ------------------------------------------------------------------ reset
 
     private int attemptReset(String reason) {
-        return attemptReset(reason, null);
+        return attemptReset(reason, null, true);
     }
 
-    /** Regenerate every registered structure not currently occupied, and reset the End dragon. */
-    private int attemptReset(String reason, String typeFilter) {
+    /**
+     * Regenerate registered structures and reset the End dragon. When {@code gate}
+     * is true (boot/scheduled) a structure is skipped unless a footprint chunk has
+     * changed since its last reset (honours skip-unchanged-chunks); a manual reset
+     * passes false to force every matching structure regardless.
+     */
+    private int attemptReset(String reason, String typeFilter, boolean gate) {
         List<Entry> entries = scanner.entries();
         List<RegenEngine.Box> boxes = new ArrayList<>();
         List<Entry> chosen = new ArrayList<>();
         for (Entry e : entries) {
-            if (e.endCentral || !types.contains(e.type)
-                    || (typeFilter != null && !e.type.equals(typeFilter))) {
+            if (!types.contains(e.type) || (typeFilter != null && !e.type.equals(typeFilter))) {
                 continue; // not a currently-configured type, or filtered out
             }
             World w = plugin.getServer().getWorld(e.world);
@@ -194,18 +210,17 @@ final class StructureReset {
             if (engine.playersNearBox(w, minCx, minCz, maxCx, maxCz)) {
                 continue; // someone is there; leave it, retry next cycle
             }
+            if (gate && !engine.boxChanged(w, minCx, minCz, maxCx, maxCz)) {
+                continue; // unchanged since our last reset — nobody has raided it
+            }
             boxes.add(new RegenEngine.Box(w, minCx, minCz, maxCx, maxCz));
             chosen.add(e);
-        }
-        // The End dragon is a direct reset, not a chunk regen (its arena is force-loaded).
-        if (typeFilter == null || "end_central".equals(typeFilter)) {
-            resetEndDragon(false);
         }
         if (boxes.isEmpty()) {
             return 0;
         }
         long nowMs = System.currentTimeMillis();
-        boolean started = engine.runBatch(boxes,
+        boolean started = engine.runBatch(boxes, true,
                 i -> scanner.markReset(chosen.get(i), nowMs),
                 () -> {
                     lastResetEpochMs = nowMs;
@@ -213,46 +228,6 @@ final class StructureReset {
                             + boxes.size() + " structure(s) regenerated.");
                 });
         return started ? boxes.size() : -1;
-    }
-
-    /**
-     * Reset the End dragon fight's saved state so a fresh dragon can spawn again.
-     * Skips if the End is not configured/loaded, a dragon is already alive, or
-     * (unless forced) a player is currently in the End.
-     *
-     * <p>This only resets the fight's flags (previously-killed etc.); it does not
-     * touch any blocks. The fight re-derives "previously killed" from whether an
-     * exit portal / end gateway exists within 8 chunks of the origin, so the dragon
-     * actually respawns once the age-based sweep regenerates the (visited) central
-     * island and removes those blocks — keeping End terrain on the same unified
-     * sweep as every other world, with no special-case localised regen here.
-     */
-    private boolean resetEndDragon(boolean force) {
-        if (!respawnDragon || endWorld == null) {
-            return false;
-        }
-        World w = plugin.getServer().getWorld(endWorld);
-        if (w == null || (!force && !w.getPlayers().isEmpty())) {
-            return false;
-        }
-        try {
-            DragonBattle db = w.getEnderDragonBattle();
-            if (db == null) {
-                return false; // no dragon fight in this world
-            }
-            if (db.getEnderDragon() != null) {
-                return false; // a dragon is already alive
-            }
-            db.setPreviouslyKilled(false); // stable Bukkit API; scanState re-confirms from the portal state
-            if (VanillaRegen.forceEndRescan(w)) {
-                plugin.getLogger().info("End dragon fight state reset in " + w.getName()
-                        + "; a fresh dragon spawns once the central island is regenerated and a player enters.");
-                return true;
-            }
-        } catch (Throwable t) {
-            plugin.getLogger().warning("Dragon reset failed: " + t);
-        }
-        return false;
     }
 
     // --------------------------------------------------------------- commands
@@ -284,7 +259,7 @@ final class StructureReset {
     }
 
     void cmdReset(CommandSender sender, String typeFilter) {
-        int n = attemptReset("manual", typeFilter);
+        int n = attemptReset("manual", typeFilter, false);
         if (n < 0) {
             sender.sendMessage("§cA regen batch is already running; try again shortly.");
         } else if (n == 0) {
@@ -297,12 +272,4 @@ final class StructureReset {
         }
     }
 
-    void cmdEndReset(CommandSender sender) {
-        if (resetEndDragon(false)) {
-            sender.sendMessage("§6[end] §fEnd dragon fight reset; a fresh dragon spawns when a player enters the End.");
-        } else {
-            sender.sendMessage("§c[end] cannot reset: End not configured/loaded, a dragon is already alive, "
-                    + "or a player is in the End.");
-        }
-    }
 }

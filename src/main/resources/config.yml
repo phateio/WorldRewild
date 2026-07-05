@@ -1,125 +1,121 @@
-# WorldRewild configuration
-#
-# Resident, perpetual resource-world regenerator. It sweeps the worlds below one
-# region file at a time ("tile" = 32x32 chunks), nearest-to-spawn first. Each
-# tile is regenerated two-phase: delete every eligible chunk's data (via Paper's
-# Moonrise chunk system), then reload them so vanilla regenerates each from
-# scratch (terrain, structures, structure mobs) with the current generator, then
-# unload/save. Deleting the whole tile first lets interior chunks regenerate free
-# of old neighbours, so a cross-version map actually converts instead of being
-# blended back toward the old terrain. TPS-gated and bounded by a concurrency cap
-# so players never trigger mass on-demand generation. After all worlds are swept
-# it waits rescan-interval-hours and repeats; a thin biome-only rim left on tile
-# edges (still bordering old chunks) heals on the next re-sweep. No FAWE.
+# WorldRewild — keep resource worlds fresh by regenerating chunks through the
+# vanilla generator. Two independent features share the worlds list below:
+#   resident-sweep  — slow background age sweep of whole regions (off by default)
+#   structure-reset — fast targeted reset of specific rare structures
 
-# Start the resident sweeper automatically when the server boots.
-enabled: true
-
-# Worlds to keep regenerating, swept in order. region-dir is relative to the
-# server's world container. world_2024 and its nether/end are Paper custom
-# dimensions stored under the primary level's dimensions folder.
-#
-# Each world may optionally set its own min-age-days (or min-age-seconds) to be
-# rewilded on a faster or slower cycle than the global default below — e.g. a
-# fresher End. This only affects the age-based wilderness sweep; rare structures
-# and the End dragon reset on their own fast cycle regardless (see structure-reset).
+# Worlds both features operate on, swept in order. Each needs a name and a required
+# min-age-days: the age sweep regenerates a chunk once its region-file timestamp is
+# that many days old (that timestamp is bumped when the chunk is modified and saved
+# — built/broken/looted, or by our own regen — not by merely loading it). A world
+# missing min-age-days is skipped with a warning. The region directory is derived
+# from the loaded world via the Bukkit API (Paper custom dimensions like world_2024
+# resolve correctly); set region-dir, relative to the world container, only for a
+# non-standard layout.
 worlds:
   - name: world_2024
-    region-dir: "world_2014/dimensions/minecraft/world_2024/region"
+    min-age-days: 90
   - name: world_2024_nether
-    region-dir: "world_2014/dimensions/minecraft/world_2024_nether/region"
+    min-age-days: 30
   - name: world_2024_the_end
-    region-dir: "world_2014/dimensions/minecraft/world_2024_the_end/region"
-    min-age-days: 1    # End wilderness refreshes daily (dragon + end cities reset every 6h below)
-
-# Only regenerate chunks not accessed for at least this many days (region-file
-# last-saved time; updated whenever a chunk is loaded, i.e. a player was near).
-# 0 = ignore age. Our own regen resets the clock, so wilderness refreshes on a
-# rolling cycle of roughly this length. Rare structures reset far faster via the
-# separate structure-reset section below, so this can stay long. A world can
-# override this individually in the worlds list above.
-min-age-days: 90
-
-# Optional override for min-age-days with sub-day granularity (for testing or
-# tuning). >= 0 takes precedence over min-age-days; e.g. 600 = 10 minutes.
-# -1 (default) means "use min-age-days".
-min-age-seconds: -1
-
-# After a full sweep of all worlds, wait this long before sweeping again.
-rescan-interval-hours: 24
-
-# TPS gate (Paper 1-minute average). Pause below tps-pause, resume at/above
-# tps-resume (hysteresis so it does not flap around 18).
-tps-pause: 18.0
-tps-resume: 18.5
-
-# Pacing. Every interval-ticks the engine dispatches up to per-tick reloads,
-# never exceeding max-concurrent-regens in flight at once (bounds generation
-# load; the real cost is chunk generation, done off the main thread). The delete
-# phase runs at up to per-tick*4 per tick. Steady-state throughput is limited by
-# the server's chunk-generation worker pool (~10-15 chunks/s here).
-interval-ticks: 2
-per-tick: 4
-max-concurrent-regens: 4
-
-# Skip any chunk with an online player within this many chunks (Chebyshev).
-# Loaded chunks are always skipped too (deleting a loaded chunk would be undone
-# when its in-memory copy re-saves). Skipped chunks are retried next sweep.
-player-safe-radius-chunks: 4
-
-# Skip chunks within this many chunks of each world's spawn (Chebyshev).
-# 0 = also regenerate spawn. Raise this to protect the Spawn2024 area.
-protect-spawn-radius-chunks: 0
-
-# Safety valve: if this many deletes fail in a row (e.g. Moonrise internals
-# changed on a Paper update), auto-pause and log a SEVERE warning.
-max-consecutive-failures: 5
-
-# Persist progress and resume an in-progress sweep on server start.
-auto-resume: true
+    min-age-days: 1
 
 # ---------------------------------------------------------------------------
-# Structure reset — regenerate specific rare structures on a fast (daily) cycle,
-# independent of min-age-days. Structures are found automatically by reading each
-# chunk's stored structure data (structures.starts) from the region files, so no
-# in-game marking is needed. Each listed structure's footprint is regenerated
-# two-phase (the same core as the resident sweep), skipping any structure a
-# player is currently in. Loot chests, structure mobs and the build come back
-# fresh, so rare loot structures are re-raidable on this cycle.
+# Resident wilderness sweep. Processes each world one region file at a time
+# ("tile" = 32x32 chunks), nearest-to-spawn first. Every tile is regenerated
+# two-phase: delete each eligible chunk's data (via Paper's Moonrise chunk system),
+# then reload so vanilla regenerates it from scratch (terrain, structures, structure
+# mobs), then unload/save. Deleting the whole tile first lets interior chunks
+# regenerate free of old neighbours, so a cross-version map actually converts
+# instead of blending back toward the old terrain; a thin biome-only rim on tile
+# edges heals when that area is next swept. No FAWE.
+resident-sweep:
+  # Run automatically at boot. Off by default (it is the heavy part) — start it on
+  # demand with /wr start. structure-reset below runs regardless of this.
+  enabled: false
+
+  # Global testing override for the per-world min-age-days: >= 0 forces this age (in
+  # seconds) on every world; e.g. 600 = 10 minutes. -1 (default) = off.
+  min-age-seconds: -1
+
+  # Skip regenerating any chunk that is unchanged since we last reset it — detected
+  # by the region file's per-chunk timestamp still matching the one we stamped right
+  # after regenerating it (stamps kept in plugins/WorldRewild/stamps/). Without this,
+  # our own regen keeps bumping that timestamp, so a chunk nobody has touched is
+  # re-regenerated on every cycle forever — most wastefully in the End, whose vast
+  # void would otherwise be re-reset daily. Chunks we have never reset have no stamp
+  # and stay eligible, so a first-time cross-version conversion still sweeps once.
+  skip-unchanged-chunks: true
+
+  # When the sweep finishes a pass of an End world, reset the dragon fight so a fresh
+  # dragon spawns on the next entry — the pass will have regenerated the central island
+  # and cleared the old exit portal / gateways the fight reads to decide "already
+  # killed". End worlds are auto-detected; /wr end reset forces it on demand.
+  respawn-dragon: true
+
+  # After a full sweep of all worlds, wait this long before sweeping again.
+  sweep-interval-hours: 24
+
+  # TPS gate (Paper 1-minute average). Pause below tps-pause, resume at/above
+  # tps-resume (hysteresis so it does not flap around 18).
+  tps-pause: 18.0
+  tps-resume: 18.5
+
+  # Pacing. Every interval-ticks the engine dispatches up to per-tick reloads, never
+  # exceeding max-concurrent-regens in flight (the real cost is chunk generation, off
+  # the main thread). The delete phase runs at up to per-tick*4 per tick. Steady-state
+  # throughput is limited by the server's chunk-generation worker pool (~10-15/s here).
+  interval-ticks: 2
+  per-tick: 4
+  max-concurrent-regens: 4
+
+  # Skip any chunk with an online player within this many chunks (Chebyshev). Loaded
+  # chunks are always skipped too (deleting a loaded chunk would be undone when its
+  # in-memory copy re-saves). Skipped chunks are retried next sweep.
+  player-safe-radius-chunks: 4
+
+  # Skip chunks within this many chunks of each world's spawn (Chebyshev).
+  # 0 = also regenerate spawn. Raise this to protect the Spawn2024 area.
+  protect-spawn-radius-chunks: 0
+
+  # Safety valve: if this many deletes fail in a row (e.g. Moonrise internals changed
+  # on a Paper update), auto-pause and log a SEVERE warning.
+  max-consecutive-failures: 5
+
+  # Persist progress and resume an in-progress sweep on server start.
+  auto-resume: true
+
+# ---------------------------------------------------------------------------
+# Structure reset — regenerate specific rare structures on a fast cycle, independent
+# of the age sweep. Structures are found automatically by reading each chunk's stored
+# structure data (structures.starts) from the region files, so no in-game marking is
+# needed. Each footprint is regenerated with the same two-phase core, skipping any a
+# player is currently in — and, when skip-unchanged-chunks is on, any unchanged since
+# its last reset, so only raided structures are refreshed.
 structure-reset:
-  # Regenerate the listed structures shortly after boot, then on every wall-clock
-  # multiple of interval-hours past local midnight (e.g. 6 -> 00:00/06:00/12:00/
-  # 18:00). It re-arms each cycle from the clock, so it stays aligned and never
-  # drifts. The plugin logs the next scheduled time on each (re)schedule.
+  # Reset shortly after boot, then on every wall-clock multiple of interval-hours past
+  # local midnight (e.g. 6 -> 00:00/06:00/12:00/18:00). It re-arms from the clock each
+  # cycle, so it stays aligned and never drifts.
   enabled: true
   interval-hours: 6
-  # How often to re-scan region files for newly generated structures. The first
-  # scan is a full pass (heavier, async); later scans only re-read chunks saved
-  # since the last scan, so they are cheap.
+
+  # How often to re-scan region files for newly generated structures. The first scan
+  # is a full pass (heavier, async); later scans only re-read chunks saved since, so
+  # they are cheap.
   rescan-hours: 168
+
   # Extra chunks added around each structure's footprint before regenerating.
   # Same-version regen needs no margin (0); raise only if edges look off.
   footprint-margin-chunks: 0
-  # Structure types to reset (Minecraft ids without the namespace). Truly rare,
-  # high-value ones only — common ones (shipwreck, monument, trial_chambers,
-  # buried_treasure, mineshaft, villages, ocean_ruin, ruined_portal) are left out
-  # on purpose so the daily reset stays light. Add more if you want.
+
+  # Structure types to reset (Minecraft ids without the namespace). Rare, high-value,
+  # low-count ones only, so the fast cycle stays light. Left out: common ones
+  # (shipwreck, monument, trial_chambers, buried_treasure, mineshaft, villages,
+  # ocean_ruin, ruined_portal) and the very numerous ancient_city / end_city — those
+  # refresh via the slower age sweep instead.
   types:
     - mansion
     - stronghold
-    - ancient_city
     - jungle_pyramid
     - desert_pyramid
     - pillager_outpost
     - bastion_remnant
-    - end_city
-  # The End dragon: on each reset, if the End is empty and the dragon is dead,
-  # reset the fight's saved state so a fresh dragon can spawn again. This only
-  # resets the fight flags — the exit portal / end gateways are cleared by the
-  # normal age-based sweep when it regenerates the central island (the fight
-  # re-derives "previously killed" from those blocks), so the dragon actually
-  # respawns on the next entry after that sweep. Renews the end-game journey:
-  # stronghold -> portal -> dragon -> end city -> elytra.
-  end-central:
-    world: world_2024_the_end
-    respawn-dragon: true

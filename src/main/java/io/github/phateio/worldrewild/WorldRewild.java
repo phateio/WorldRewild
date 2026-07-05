@@ -81,7 +81,7 @@ public final class WorldRewild extends JavaPlugin {
             }
             case "end" -> {
                 if (args.length >= 2 && args[1].equalsIgnoreCase("reset")) {
-                    structures.cmdEndReset(sender);
+                    engine.cmdEndReset(sender);
                 } else {
                     sender.sendMessage("§cusage: /wr end reset");
                 }
