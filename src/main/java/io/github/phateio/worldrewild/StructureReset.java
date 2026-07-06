@@ -159,6 +159,15 @@ final class StructureReset {
         ZonedDateTime midnight = now.truncatedTo(ChronoUnit.DAYS);
         long secsSince = Duration.between(midnight, now).getSeconds();
         ZonedDateTime next = midnight.plusSeconds((secsSince / intervalSeconds + 1) * intervalSeconds);
+        // A tick-scheduled callback can wake a hair before its target instant: the
+        // tick countdown is anchored to the tick's start, but `now` is sampled partway
+        // into that tick. Without this guard the recomputed `next` would be that same
+        // boundary, and we would re-fire (and re-reset) every tick until the wall clock
+        // finally crosses it. Treat a sub-second gap as "already at the boundary" and
+        // aim past it, so each boundary fires exactly once.
+        if (Duration.between(now, next).toMillis() < 1000L) {
+            next = next.plusSeconds(intervalSeconds);
+        }
         long delayTicks = Math.max(1L, Duration.between(now, next).toMillis() / 50L);
         resetTask = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
             attemptReset("scheduled");
