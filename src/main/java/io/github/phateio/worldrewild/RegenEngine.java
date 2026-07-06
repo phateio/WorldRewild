@@ -924,7 +924,13 @@ public final class RegenEngine {
             return;
         }
         if (state == State.WAITING) {
-            if (System.currentTimeMillis() >= nextSweepEpochMs) {
+            // Guard on !scanning: beginSweep dispatches an async region scan but leaves
+            // state WAITING until it completes (only then -> RUNNING). Without this the
+            // next tick would see WAITING with the timer still elapsed and fire another
+            // beginSweep, stacking one redundant concurrent scan per tick until the
+            // first completes. scanWorldAndRun sets scanning=true synchronously, and
+            // clears it together with the RUNNING transition, so this fires exactly once.
+            if (!scanning && System.currentTimeMillis() >= nextSweepEpochMs) {
                 beginSweep();
             }
             return;
