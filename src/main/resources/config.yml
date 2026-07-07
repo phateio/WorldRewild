@@ -43,10 +43,11 @@ resident-sweep:
   # and stay eligible, so a first-time cross-version conversion still sweeps once.
   skip-unchanged-chunks: true
 
-  # When the sweep finishes a pass of an End world, reset the dragon fight so a fresh
-  # dragon spawns on the next entry — the pass will have regenerated the central island
-  # and cleared the old exit portal / gateways the fight reads to decide "already
-  # killed". End worlds are auto-detected; /wr end reset forces it on demand.
+  # When a sweep pass actually regenerates the central-island chunk (0,0) of an End
+  # world — clearing the exit portal / gateways the fight reads to decide "already
+  # killed" — reset the dragon fight so a fresh dragon spawns on the next entry. Passes
+  # that regenerate nothing there (nobody visited, so skip-unchanged skips it) leave the
+  # fight alone. End worlds are auto-detected; /wr end reset forces it on demand.
   respawn-dragon: true
 
   # After a full sweep of all worlds, wait this long before sweeping again.

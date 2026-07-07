@@ -99,6 +99,12 @@ public final class RegenEngine {
     private boolean respawnDragon;   // reset the End dragon after an End world's sweep pass
 
     // Runtime state.
+    // Did the current world's pass regenerate the central-island chunk (0,0)? The End
+    // exit portal sits in that chunk and is what vanilla reads to decide "dragon already
+    // killed"; only when we actually rebuild it should the dragon fight be reset. Scoped
+    // per world pass (cleared when a world's scan starts), persisted so a mid-pass restart
+    // does not drop a pending reset.
+    private boolean islandRegen = false;
     private volatile State state = State.STOPPED;
     private volatile boolean scanning = false;
     private boolean tpsPaused = false;
@@ -702,11 +708,12 @@ public final class RegenEngine {
     }
 
     private void advanceWorld() {
-        // The world that just finished its pass may have cleared the End arena
-        // (exit portal / gateways) — reset the dragon fight now so a fresh one can
-        // spawn on the next entry. resetEndDragon no-ops unless this world has a
-        // dragon fight, so it self-limits to the End.
-        if (respawnDragon && cur != null) {
+        // Only reset the dragon fight if this world's pass actually rebuilt the central
+        // island (chunk 0,0) — that is where the exit portal lives, and clearing it is
+        // what makes a fresh dragon spawn. Without this gate the reset fired every pass,
+        // spamming the log (and re-scanning the fight) every cycle even when nothing in
+        // the End regenerated. resetEndDragon no-ops off the End, so it self-limits too.
+        if (respawnDragon && cur != null && islandRegen) {
             resetEndDragon(getWorld(cur.name()), false);
         }
         worldIndex++;
@@ -733,6 +740,7 @@ public final class RegenEngine {
             return;
         }
         cur = worldEntries.get(worldIndex);
+        islandRegen = false; // reset per world pass, before any early-return to advanceWorld
         World w = getWorld(cur.name());
         if (w == null) {
             plugin.getLogger().warning("World '" + cur.name() + "' not loaded; skipping.");
@@ -1011,6 +1019,9 @@ public final class RegenEngine {
             try {
                 VanillaRegen.deleteChunk(w, cx, cz);
                 tileDeleted[i] = true;
+                if (cx == 0 && cz == 0) {
+                    islandRegen = true; // central island cleared -> the End dragon fight may reset
+                }
                 consecutiveFailures = 0;
             } catch (Throwable t) {
                 consecutiveFailures++;
@@ -1278,6 +1289,7 @@ public final class RegenEngine {
         p.setProperty("completed", Long.toString(completed));
         p.setProperty("nextSweepEpochMs", Long.toString(nextSweepEpochMs));
         p.setProperty("consecutiveFailures", Integer.toString(consecutiveFailures));
+        p.setProperty("islandRegen", Boolean.toString(islandRegen));
         p.setProperty("pauseReason", pauseReason == null ? "" : pauseReason);
         try (var out = new FileOutputStream(stateFile)) {
             p.store(out, "WorldRewild progress");
@@ -1307,6 +1319,7 @@ public final class RegenEngine {
         completed = parseLong(p.getProperty("completed"), 0);
         nextSweepEpochMs = parseLong(p.getProperty("nextSweepEpochMs"), 0);
         consecutiveFailures = parseInt(p.getProperty("consecutiveFailures"), 0);
+        islandRegen = Boolean.parseBoolean(p.getProperty("islandRegen", "false"));
         String pr = p.getProperty("pauseReason", "");
         pauseReason = pr.isEmpty() ? null : pr;
     }

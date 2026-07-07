@@ -44,13 +44,15 @@ areas players actually change keep refreshing (on the `min-age` cycle).
 Set `respawn-dragon: true` on the End world and the age sweep renews the dragon
 too. The central arena can't be chunk-regenerated in place, so instead the
 ordinary sweep regenerates the End's central island — once a kill has changed it
-and it goes idle — removing the old exit portal and end gateways; then, when that
-world finishes its sweep pass, the fight's saved state is reset (via NMS). Because
-the fight re-derives "previously killed" from whether an exit portal / gateway
-still exists, a fresh dragon spawns on the next entry. So the end-game journey
-(stronghold → portal → dragon → end city → elytra) renews. Because it rides the
-age sweep, it only happens while the sweep is enabled; `/wr end reset` forces a
-fight-state reset on demand.
+and it goes idle — removing the old exit portal and end gateways. Only the pass
+that actually regenerates the central-island chunk (0,0) then resets the fight's
+saved state (via NMS); a pass that touches nothing there — nobody visited, so
+skip-unchanged skips it — leaves the fight alone, so an unbeaten dragon is never
+disturbed. Because the fight re-derives "previously killed" from whether an exit
+portal / gateway still exists, a fresh dragon spawns on the next entry. So the
+end-game journey (stronghold → portal → dragon → end city → elytra) renews.
+Because it rides the age sweep, it only happens while the sweep is enabled;
+`/wr end reset` forces a fight-state reset on demand.
 
 ### Rare structures on a fast cycle
 
