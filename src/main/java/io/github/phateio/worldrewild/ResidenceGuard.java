@@ -93,7 +93,7 @@ final class ResidenceGuard implements Listener {
             return false;
         }
         if (player != null) {
-            player.sendMessage("§cYou can't claim here: WorldRewild periodically regenerates this structure (§e"
+            player.sendMessage("§cYou can't claim here: this structure is periodically reset (§e"
                     + hit.type + "§c), so the claim would be wiped.");
         }
         return true;
