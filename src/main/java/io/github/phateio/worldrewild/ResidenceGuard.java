@@ -93,8 +93,8 @@ final class ResidenceGuard implements Listener {
             return false;
         }
         if (player != null) {
-            player.sendMessage("§cYou can't claim here: this structure is periodically reset (§e"
-                    + hit.type + "§c), so the claim would be wiped.");
+            player.sendMessage("§cYou cannot create a residence too close to the §e"
+                    + hit.type + "§c.");
         }
         return true;
     }
