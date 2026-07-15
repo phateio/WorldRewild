@@ -93,8 +93,8 @@ final class ResidenceGuard implements Listener {
             return false;
         }
         if (player != null) {
-            player.sendMessage("§c[WorldRewild] 此處是伺服器會定期重置的結構(§e" + hit.type
-                    + "§c),不開放圈地,以免你的建物被重置清除。");
+            player.sendMessage("§cYou can't claim here: WorldRewild periodically regenerates this structure (§e"
+                    + hit.type + "§c), so the claim would be wiped.");
         }
         return true;
     }
