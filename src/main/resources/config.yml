@@ -105,6 +105,19 @@ structure-reset:
   # Same-version regen needs no margin (0); raise only if edges look off.
   footprint-margin-chunks: 0
 
+  # Soft-dependency on the Residence plugin (https://github.com/Zrips/Residence).
+  # When Residence is installed and this is on, players cannot create, subzone,
+  # resize, or add an area to a residence that would cover any chunk of a reset
+  # structure's footprint — the next reset would wipe the build, and this stops
+  # players fencing off a stronghold / mansion / pyramid etc. from everyone else.
+  # The blocked area is the whole footprint bounding box (exactly what gets reset),
+  # so a large sparse structure like a stronghold blocks claims across its bbox.
+  # Existing residences are never touched; only rewilded worlds have reset
+  # structures, so permanent worlds are unaffected. Players with
+  # worldrewild.bypass.structureclaim (op by default) are exempt. No effect if
+  # Residence is absent.
+  block-residence-claims: true
+
   # Structure types to reset (Minecraft ids without the namespace). Rare, high-value,
   # low-count ones only, so the fast cycle stays light. Left out: common ones
   # (shipwreck, monument, trial_chambers, buried_treasure, mineshaft, villages,

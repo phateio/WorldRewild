@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "io.github.phateio"
-version = "0.10.3"
+version = "0.11.0"
 
 java {
     // Paper 26.2 (and thus its paper-api artifact) requires Java 25, so this
@@ -16,6 +16,7 @@ java {
 repositories {
     mavenCentral()
     maven("https://repo.papermc.io/repository/maven-public/")
+    maven("https://jitpack.io")
 }
 
 dependencies {
@@ -24,6 +25,15 @@ dependencies {
     // Paper's Moonrise chunk system (RegionDataController), which is 26.x-specific,
     // so it targets Paper 26.2 rather than an older stable API line.
     compileOnly("io.papermc.paper:paper-api:26.2.build.40-alpha")
+
+    // Residence API, used only for the optional claim guard when the Residence
+    // plugin is installed at runtime (soft-dependency). Compiled against 6.0.0.1
+    // from JitPack; the running server has 6.0.1.8, but the tiny surface used here
+    // (creation/subzone/area-add/resize events + CuboidArea) is stable across
+    // 6.0.x. Non-transitive: we need only Residence's own classes, and pulling its
+    // Spigot/CMILib deps would fail to resolve and is unnecessary. Not on the
+    // runtime classpath.
+    compileOnly("com.github.Zrips:Residence:6.0.0.1") { isTransitive = false }
 }
 
 tasks.withType<JavaCompile>().configureEach {

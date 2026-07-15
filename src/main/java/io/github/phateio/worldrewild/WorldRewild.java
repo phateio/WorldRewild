@@ -21,6 +21,13 @@ public final class WorldRewild extends JavaPlugin {
         engine.onEnable();
         structures = new StructureReset(this, engine);
         structures.onEnable();
+        // Optional Residence integration (soft-depend). Registering the listener
+        // touches Residence API classes, so only do it when Residence is present;
+        // the guard itself checks the live config toggle each event.
+        if (getServer().getPluginManager().getPlugin("Residence") != null) {
+            getServer().getPluginManager().registerEvents(new ResidenceGuard(structures), this);
+            getLogger().info("Residence detected: guarding claims over reset structures.");
+        }
     }
 
     @Override

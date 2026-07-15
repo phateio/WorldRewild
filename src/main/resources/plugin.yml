@@ -4,6 +4,7 @@ main: io.github.phateio.worldrewild.WorldRewild
 api-version: "1.21"
 author: shikendon
 description: A Paper plugin for rewilding resource worlds.
+softdepend: [Residence]
 commands:
   worldrewild:
     aliases: [wr]
@@ -13,4 +14,7 @@ commands:
 permissions:
   worldrewild.admin:
     description: Manage the rewilder.
+    default: op
+  worldrewild.bypass.structureclaim:
+    description: Exempt from the block on claiming residences over reset structures.
     default: op

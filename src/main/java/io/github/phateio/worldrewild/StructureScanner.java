@@ -83,6 +83,23 @@ final class StructureScanner {
         return new ArrayList<>(registry.values());
     }
 
+    /**
+     * The first registered structure whose chunk footprint overlaps the given
+     * inclusive chunk box in {@code world}, or {@code null} if none. The registry
+     * only holds the enabled reset types, so a hit means the box covers chunks
+     * structure-reset periodically regenerates. Used by the Residence guard.
+     */
+    synchronized Entry firstOverlapping(String world, int minCx, int minCz, int maxCx, int maxCz) {
+        for (Entry e : registry.values()) {
+            if (e.world.equals(world)
+                    && minCx <= e.maxCx && e.minCx <= maxCx
+                    && minCz <= e.maxCz && e.minCz <= maxCz) {
+                return e;
+            }
+        }
+        return null;
+    }
+
     synchronized int size() {
         return registry.size();
     }

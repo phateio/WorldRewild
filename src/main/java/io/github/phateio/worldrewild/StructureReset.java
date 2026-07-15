@@ -41,6 +41,7 @@ final class StructureReset {
     private long intervalSeconds; // reset cadence; also the wall-clock alignment period
     private long rescanTicks;
     private int margin;
+    private boolean blockResidenceClaims;
     private final Set<String> types = new LinkedHashSet<>();
 
     private BukkitTask resetTask;
@@ -62,9 +63,20 @@ final class StructureReset {
         long rescanSec = s == null ? 604800L : Durations.secondsOr(s.get("rescan"), 604800L); // 7d
         rescanTicks = rescanSec * 20L;
         margin = s == null ? 0 : Math.max(0, s.getInt("footprint-margin-chunks", 0));
+        blockResidenceClaims = s == null || s.getBoolean("block-residence-claims", true);
         types.clear();
         List<String> cfgTypes = s == null ? List.of() : s.getStringList("types");
         types.addAll(cfgTypes.isEmpty() ? DEFAULT_TYPES : cfgTypes);
+    }
+
+    /** Whether the Residence claim guard should refuse claims over reset structures. */
+    boolean blockResidenceClaims() {
+        return blockResidenceClaims;
+    }
+
+    /** The structure registry, so the Residence guard can test claim footprints. */
+    StructureScanner scanner() {
+        return scanner;
     }
 
     /**

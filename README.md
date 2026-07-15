@@ -69,6 +69,20 @@ that has not changed since its last reset, so only raided structures are refresh
 Very numerous types like ancient cities and end cities are left off this fast cycle
 and refresh via the slower age sweep.
 
+### Guarding reset structures from land claims (Residence)
+
+WorldRewild soft-depends on [Residence](https://github.com/Zrips/Residence): when
+that plugin is installed, `structure-reset.block-residence-claims` (default on)
+refuses any residence claim — new residence, subzone, area add, or resize — that
+would cover a chunk of a reset structure's footprint. Without this, a player could
+fence off a stronghold or mansion so no one else can use it (and lose their build
+to the next reset anyway). The blocked region is the whole footprint bounding box,
+i.e. exactly what the reset regenerates, so a large sparse structure such as a
+stronghold blocks claims across its bbox. Existing residences are left untouched,
+and only rewilded worlds have reset structures, so permanent worlds are unaffected.
+Players with `worldrewild.bypass.structureclaim` (op by default) are exempt. With
+Residence absent, the setting does nothing.
+
 ### Why whole tiles, not one chunk at a time
 
 On a cross-version map (e.g. a 1.21.11 world opened under 26.2), the worldgen
@@ -120,7 +134,8 @@ see above), `respawn-dragon` (renew the End dragon after its sweep pass),
 `max-consecutive-failures`, `auto-resume`.
 
 `structure-reset`: `enabled`, `interval` (default 6h, wall-clock aligned), `rescan`
-(registry refresh), `footprint-margin-chunks`, `types`.
+(registry refresh), `footprint-margin-chunks`, `block-residence-claims` (Residence
+soft-depend; default true), `types`.
 
 ## Building
 
