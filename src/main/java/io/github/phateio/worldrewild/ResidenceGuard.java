@@ -83,18 +83,26 @@ final class ResidenceGuard implements Listener {
         if (world == null || lo == null || hi == null) {
             return false;
         }
-        int x1 = lo.getBlockX() >> 4;
-        int x2 = hi.getBlockX() >> 4;
-        int z1 = lo.getBlockZ() >> 4;
-        int z2 = hi.getBlockZ() >> 4;
-        Entry hit = structures.scanner().firstOverlapping(world,
-                Math.min(x1, x2), Math.min(z1, z2), Math.max(x1, x2), Math.max(z1, z2));
-        if (hit == null) {
+        int minCx = Math.min(lo.getBlockX(), hi.getBlockX()) >> 4;
+        int maxCx = Math.max(lo.getBlockX(), hi.getBlockX()) >> 4;
+        int minCz = Math.min(lo.getBlockZ(), hi.getBlockZ()) >> 4;
+        int maxCz = Math.max(lo.getBlockZ(), hi.getBlockZ()) >> 4;
+
+        // Fast path: a structure a periodic scan already recorded. This also covers a
+        // structure whose footprint reaches into the box from a start chunk outside it.
+        Entry hit = structures.scanner().firstOverlapping(world, minCx, minCz, maxCx, maxCz);
+        String type = hit != null ? hit.type
+                // Slow path: the registry lags freshly generated terrain (scans are
+                // periodic), so read the claimed chunks' structure NBT straight from the
+                // region files. Closes the claim-before-scan gap that let a player fence
+                // off a structure minutes after generating it, before any scan saw it.
+                : structures.scanner().overlappingTypeLive(structures.regionDir(world),
+                        structures.resetTypes(), minCx, minCz, maxCx, maxCz);
+        if (type == null) {
             return false;
         }
         if (player != null) {
-            player.sendMessage("§cYou cannot create a residence too close to the §e"
-                    + hit.type + "§c.");
+            player.sendMessage("§cYou cannot create a residence too close to the §e" + type + "§c.");
         }
         return true;
     }

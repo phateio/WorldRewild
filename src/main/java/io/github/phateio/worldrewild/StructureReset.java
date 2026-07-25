@@ -110,6 +110,26 @@ final class StructureReset {
         return out;
     }
 
+    /**
+     * The region directory of a configured world, resolved exactly as {@link
+     * #worldDirs()} (so custom dimensions and {@code region-dir} overrides agree with
+     * what the scanner reads), or {@code null} if it is not a configured world or
+     * cannot be resolved. Used by the Residence guard's live claim check.
+     */
+    File regionDir(String world) {
+        for (WorldDir wd : worldDirs()) {
+            if (wd.name().equals(world)) {
+                return wd.regionDir();
+            }
+        }
+        return null;
+    }
+
+    /** The currently configured reset types, for the Residence guard's live check. */
+    Set<String> resetTypes() {
+        return Set.copyOf(types);
+    }
+
     // --------------------------------------------------------------- lifecycle
 
     void onEnable() {

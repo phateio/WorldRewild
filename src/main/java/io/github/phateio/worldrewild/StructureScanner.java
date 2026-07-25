@@ -100,6 +100,46 @@ final class StructureScanner {
         return null;
     }
 
+    /**
+     * Live overlap test read straight from the region files, bypassing the scanned
+     * registry: does any structure of {@code types} have a footprint overlapping the
+     * inclusive chunk box, per the chunks' <i>current</i> {@code structures.starts}
+     * NBT? Reads only the chunks inside the box, so it is bounded by the claim size.
+     * Unlike {@link #firstOverlapping} it sees structures in freshly generated chunks
+     * no scan has recorded yet — the claim-before-scan case the Residence guard must
+     * still refuse. It finds a structure whose <i>start</i> chunk lies in the box
+     * (where {@code starts} with the piece bounding boxes is stored); one merely
+     * clipped by the box from a start outside it is left to {@link #firstOverlapping}
+     * once scanned. Returns the matched type, or {@code null}. Unsynchronized: it
+     * touches only the region files, never the shared registry.
+     */
+    String overlappingTypeLive(File regionDir, Set<String> types, int minCx, int minCz, int maxCx, int maxCz) {
+        if (regionDir == null || !regionDir.isDirectory() || types.isEmpty()) {
+            return null;
+        }
+        List<Entry> found = new ArrayList<>();
+        for (int rx = minCx >> 5; rx <= (maxCx >> 5); rx++) {
+            for (int rz = minCz >> 5; rz <= (maxCz >> 5); rz++) {
+                File f = new File(regionDir, "r." + rx + "." + rz + ".mca");
+                if (!f.isFile()) {
+                    continue;
+                }
+                found.clear();
+                try {
+                    scanRegionChunks(f, rx, rz, types, minCx, minCz, maxCx, maxCz, found);
+                } catch (Exception e) {
+                    continue; // unreadable / torn read — treat as no hit for this region
+                }
+                for (Entry e : found) {
+                    if (minCx <= e.maxCx && e.minCx <= maxCx && minCz <= e.maxCz && e.minCz <= maxCz) {
+                        return e.type;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     synchronized int size() {
         return registry.size();
     }
@@ -224,6 +264,46 @@ final class StructureScanner {
                 }
                 stats[1]++;
                 extractStarts(world, Nbt.read(data), types, out);
+            }
+        }
+    }
+
+    /**
+     * Like {@link #scanRegion} but reads only the chunks of {@code f} that fall within
+     * the inclusive chunk box, and without the incremental timestamp filter — for the
+     * on-demand live claim check, which needs current data regardless of when a chunk
+     * was last saved. {@code rx}/{@code rz} are {@code f}'s region coordinates.
+     */
+    private static void scanRegionChunks(File f, int rx, int rz, Set<String> types,
+                                         int minCx, int minCz, int maxCx, int maxCz,
+                                         List<Entry> out) throws IOException {
+        if (f.length() < HEADER_BYTES) {
+            return;
+        }
+        int cx0 = Math.max(minCx, rx << 5);
+        int cx1 = Math.min(maxCx, (rx << 5) + 31);
+        int cz0 = Math.max(minCz, rz << 5);
+        int cz1 = Math.min(maxCz, (rz << 5) + 31);
+        if (cx0 > cx1 || cz0 > cz1) {
+            return;
+        }
+        byte[] header = new byte[HEADER_BYTES];
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            raf.readFully(header);
+            for (int cz = cz0; cz <= cz1; cz++) {
+                for (int cx = cx0; cx <= cx1; cx++) {
+                    int b = ((cx & 31) + (cz & 31) * 32) * 4;
+                    int off = ((header[b] & 0xFF) << 16) | ((header[b + 1] & 0xFF) << 8) | (header[b + 2] & 0xFF);
+                    int cnt = header[b + 3] & 0xFF;
+                    if (off == 0 || cnt == 0) {
+                        continue;
+                    }
+                    byte[] data = readChunk(raf, off, cnt);
+                    if (data == null) {
+                        continue;
+                    }
+                    extractStarts("", Nbt.read(data), types, out);
+                }
             }
         }
     }
