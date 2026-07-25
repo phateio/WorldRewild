@@ -13,6 +13,7 @@ public final class WorldRewild extends JavaPlugin {
 
     private RegenEngine engine;
     private StructureReset structures;
+    private ResidenceGuard residenceGuard;
 
     @Override
     public void onEnable() {
@@ -25,7 +26,8 @@ public final class WorldRewild extends JavaPlugin {
         // touches Residence API classes, so only do it when Residence is present;
         // the guard itself checks the live config toggle each event.
         if (getServer().getPluginManager().getPlugin("Residence") != null) {
-            getServer().getPluginManager().registerEvents(new ResidenceGuard(structures), this);
+            residenceGuard = new ResidenceGuard(structures);
+            getServer().getPluginManager().registerEvents(residenceGuard, this);
             getLogger().info("Residence detected: guarding claims over reset structures.");
         }
     }
@@ -83,7 +85,14 @@ public final class WorldRewild extends JavaPlugin {
                     case "status" -> send(sender, structures.cmdStatus());
                     case "scan" -> structures.cmdScan(sender);
                     case "reset" -> structures.cmdReset(sender, args.length >= 3 ? args[2] : null);
-                    default -> sender.sendMessage("§cusage: /wr struct <status|scan|reset [type]>");
+                    case "audit" -> {
+                        if (residenceGuard != null) {
+                            residenceGuard.audit(sender);
+                        } else {
+                            sender.sendMessage("§cResidence is not installed; nothing to audit.");
+                        }
+                    }
+                    default -> sender.sendMessage("§cusage: /wr struct <status|scan|reset [type]|audit>");
                 }
             }
             case "end" -> {

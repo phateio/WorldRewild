@@ -1,15 +1,21 @@
 package io.github.phateio.worldrewild;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.util.Vector;
 
+import com.bekvon.bukkit.residence.Residence;
 import com.bekvon.bukkit.residence.event.ResidenceAreaAddEvent;
 import com.bekvon.bukkit.residence.event.ResidenceCreationEvent;
 import com.bekvon.bukkit.residence.event.ResidenceSizeChangeEvent;
 import com.bekvon.bukkit.residence.event.ResidenceSubzoneCreationEvent;
+import com.bekvon.bukkit.residence.protection.ClaimedResidence;
 import com.bekvon.bukkit.residence.protection.CuboidArea;
 
 import io.github.phateio.worldrewild.StructureScanner.Entry;
@@ -105,5 +111,60 @@ final class ResidenceGuard implements Listener {
             player.sendMessage("§cYou cannot create a residence too close to the §e" + type + "§c.");
         }
         return true;
+    }
+
+    /**
+     * List existing residences (and subzones) whose area overlaps a reset structure
+     * the scanner has recorded. Read-only: it reports, never modifies or removes
+     * anything. Surfaces claims made before the structure was discovered — the
+     * claim-before-scan cases {@link #refuse} now blocks at creation, but which were
+     * grandfathered in because existing residences are never revisited. Removing one,
+     * if wanted, is a manual {@code /res} decision left to an admin.
+     */
+    void audit(CommandSender sender) {
+        Residence residence = Residence.getInstance();
+        if (residence == null) {
+            sender.sendMessage("§cResidence is not available.");
+            return;
+        }
+        StructureScanner scanner = structures.scanner();
+        List<String> lines = new ArrayList<>();
+        for (ClaimedResidence res : residence.getResidenceManager().getResidences().values()) {
+            collectOverlaps(res, scanner, lines);
+        }
+        if (lines.isEmpty()) {
+            sender.sendMessage("§6[audit] §fno residence overlaps a reset structure.");
+            return;
+        }
+        sender.sendMessage("§6[audit] §e" + lines.size()
+                + "§f residence area(s) overlap a reset structure:");
+        lines.forEach(sender::sendMessage);
+    }
+
+    /** Append a line for each area of {@code res} (and its subzones) that overlaps one. */
+    private static void collectOverlaps(ClaimedResidence res, StructureScanner scanner, List<String> out) {
+        for (CuboidArea area : res.getAreaArray()) {
+            if (area == null) {
+                continue;
+            }
+            String world = area.getWorldName();
+            Vector lo = area.getLowVector();
+            Vector hi = area.getHighVector();
+            if (world == null || lo == null || hi == null) {
+                continue;
+            }
+            int minCx = Math.min(lo.getBlockX(), hi.getBlockX()) >> 4;
+            int maxCx = Math.max(lo.getBlockX(), hi.getBlockX()) >> 4;
+            int minCz = Math.min(lo.getBlockZ(), hi.getBlockZ()) >> 4;
+            int maxCz = Math.max(lo.getBlockZ(), hi.getBlockZ()) >> 4;
+            Entry hit = scanner.firstOverlapping(world, minCx, minCz, maxCx, maxCz);
+            if (hit != null) {
+                out.add("§7- §f" + res.getName() + " §7(" + res.getOwner() + ", " + world
+                        + ") §7↔ §e" + hit.type + " §7@chunk " + hit.startCx + "," + hit.startCz);
+            }
+        }
+        for (ClaimedResidence sub : res.getSubzones()) {
+            collectOverlaps(sub, scanner, out);
+        }
     }
 }
