@@ -308,7 +308,7 @@ final class StructureScanner {
         }
     }
 
-    private static byte[] readChunk(RandomAccessFile raf, int offSectors, int sectorCount) throws IOException {
+    static byte[] readChunk(RandomAccessFile raf, int offSectors, int sectorCount) throws IOException {
         raf.seek((long) offSectors * 4096L);
         int len = raf.readInt();
         if (len <= 1 || len > sectorCount * 4096) {

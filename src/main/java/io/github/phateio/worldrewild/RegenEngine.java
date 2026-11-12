@@ -7,6 +7,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -23,6 +24,7 @@ import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.WorldBorder;
 import org.bukkit.boss.DragonBattle;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
@@ -69,6 +71,33 @@ public final class RegenEngine {
     // the loaded world's folder (the normal case). minAgeSeconds is the resolved
     // per-world age threshold.
     private record WorldEntry(String name, File regionDirOverride, long minAgeSeconds) {}
+
+    /**
+     * The inclusive chunk range the world border touches. A chunk wholly outside it
+     * is never swept: players cannot reach it, so anything stored there is spill
+     * from generation near the border, not something to keep fresh.
+     */
+    private record Bounds(int minCx, int minCz, int maxCx, int maxCz) {
+        static Bounds of(World w) {
+            WorldBorder b = w.getWorldBorder();
+            Location c = b.getCenter();
+            double half = b.getSize() / 2.0;
+            return new Bounds(blockToChunk(c.getX() - half), blockToChunk(c.getZ() - half),
+                    blockToChunk(c.getX() + half), blockToChunk(c.getZ() + half));
+        }
+
+        private static int blockToChunk(double block) {
+            return (int) Math.floor(block / 16.0);
+        }
+
+        boolean contains(int cx, int cz) {
+            return cx >= minCx && cx <= maxCx && cz >= minCz && cz <= maxCz;
+        }
+
+        boolean overlapsRegion(int rx, int rz) {
+            return (rx << 5) + 31 >= minCx && rx << 5 <= maxCx && (rz << 5) + 31 >= minCz && rz << 5 <= maxCz;
+        }
+    }
 
     /** A chunk rectangle (inclusive) to regenerate as one box of a batch. */
     record Box(World world, int minCx, int minCz, int maxCx, int maxCz) {}
@@ -133,6 +162,7 @@ public final class RegenEngine {
     private int tileN = 0;
     private int tileDelPos = 0;
     private int tileLoadPos = 0;
+    private boolean tileScanning = false; // the next tile's chunk scan is running off the main thread
 
     // Per-chunk "reset stamp" sidecar used to skip chunks unchanged since our
     // last reset (see ResetStamps).
@@ -347,7 +377,7 @@ public final class RegenEngine {
     }
 
     private record CountJob(String name, File regionDir, int spawnCx, int spawnCz, long minAgeSeconds,
-                            boolean skipUnchanged) {}
+                            boolean skipUnchanged, Bounds bounds) {}
 
     /** Dry scan: report eligible chunk counts per configured world, without starting. */
     void cmdCount(CommandSender sender) {
@@ -359,11 +389,11 @@ public final class RegenEngine {
         for (WorldEntry e : worldEntries) {
             World w = getWorld(e.name());
             if (w == null) {
-                jobs.add(new CountJob(e.name(), null, 0, 0, e.minAgeSeconds(), skipUnchanged));
+                jobs.add(new CountJob(e.name(), null, 0, 0, e.minAgeSeconds(), skipUnchanged, null));
             } else {
                 Location s = w.getSpawnLocation();
                 jobs.add(new CountJob(e.name(), regionDir(e, w), s.getBlockX() >> 4, s.getBlockZ() >> 4,
-                        e.minAgeSeconds(), skipUnchanged));
+                        e.minAgeSeconds(), skipUnchanged, Bounds.of(w)));
             }
         }
         sender.sendMessage("§6[count] §fscanning " + jobs.size() + " world(s), protect-spawn="
@@ -378,7 +408,7 @@ public final class RegenEngine {
                 }
                 try {
                     long c = countEligible(j.name(), j.regionDir(), j.spawnCx(), j.spawnCz(),
-                            j.minAgeSeconds(), j.skipUnchanged());
+                            j.minAgeSeconds(), j.skipUnchanged(), j.bounds());
                     grand += c;
                     lines.add("§7  " + j.name() + ": §e" + c + " §7(min-age=" + Durations.human(j.minAgeSeconds()) + ")");
                 } catch (Throwable t) {
@@ -762,10 +792,11 @@ public final class RegenEngine {
         final String name = cur.name();
         final long minAge = cur.minAgeSeconds();
         final boolean skipUnchanged = this.skipUnchanged;
+        final Bounds bounds = Bounds.of(w);
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             int[] built;
             try {
-                built = listRegions(name, rdFinal, spawnCx, spawnCz, minAge, skipUnchanged);
+                built = listRegions(name, rdFinal, spawnCx, spawnCz, minAge, skipUnchanged, bounds);
             } catch (Throwable t) {
                 plugin.getLogger().severe("Scan failed for " + name + ": " + t);
                 built = EMPTY;
@@ -818,7 +849,8 @@ public final class RegenEngine {
      * spawn guard, and — when {@code skipUnchanged} is on — changed since we last
      * reset it (its live timestamp advanced past its reset stamp)? {@code stamp}
      * is the region's per-slot reset stamps (null = none recorded, i.e. never
-     * reset by us, so the chunk always counts as changed and passes).
+     * reset by us, so the chunk always counts as changed and passes). Header-only;
+     * {@link #eligibleSlots} adds the border and generation-status checks.
      */
     private boolean isEligible(byte[] header, int i, int rx, int rz, int spawnCx, int spawnCz,
                               long nowSec, long minAge, boolean skipUnchanged, int[] stamp) {
@@ -846,24 +878,81 @@ public final class RegenEngine {
         return true;
     }
 
+    /**
+     * Eligible slots of one region file, in slot order ({@code firstOnly}: at most
+     * one). Beyond {@link #isEligible}, a chunk must lie within the world border and
+     * be fully generated. Generating a chunk writes its not-yet-visited neighbours to
+     * disk as partial proto-chunks; regenerating those to full would write a fresh
+     * ring of proto-chunks further out, so every sweep pushed the world outward
+     * without bound. Proto-chunks are therefore never regenerated — and, when
+     * {@code stampSkipped}, stamped at their current timestamp so later scans skip
+     * them from the header alone until a player's visit actually changes them.
+     */
+    private int[] eligibleSlots(String world, File f, int rx, int rz, int spawnCx, int spawnCz,
+                                long minAge, boolean skipUnchanged, Bounds bounds,
+                                boolean firstOnly, boolean stampSkipped) throws IOException {
+        if (!bounds.overlapsRegion(rx, rz) || f.length() < HEADER_BYTES) {
+            return EMPTY;
+        }
+        long now = System.currentTimeMillis() / 1000L;
+        int[] stamp = skipUnchanged ? stamps.region(world, rx, rz) : null;
+        byte[] header = new byte[HEADER_BYTES];
+        int[] slots = new int[SLOTS];
+        int n = 0;
+        int[] protoTs = new int[SLOTS];
+        boolean[] protoMask = new boolean[SLOTS];
+        boolean anyProto = false;
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            raf.readFully(header);
+            for (int i = 0; i < SLOTS; i++) {
+                if (!bounds.contains(rx * 32 + (i & 31), rz * 32 + (i >> 5))
+                        || !isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge, skipUnchanged, stamp)) {
+                    continue;
+                }
+                if (!isFullChunk(raf, header, i)) {
+                    protoTs[i] = (int) readUInt32(header, 4096 + i * 4);
+                    protoMask[i] = true;
+                    anyProto = true;
+                    continue;
+                }
+                slots[n++] = i;
+                if (firstOnly) {
+                    break;
+                }
+            }
+        }
+        if (anyProto && stampSkipped && skipUnchanged) {
+            stamps.update(world, rx, rz, protoTs, protoMask);
+        }
+        return Arrays.copyOf(slots, n);
+    }
+
+    /**
+     * Whether slot {@code i}'s stored chunk has reached {@code minecraft:full}. An
+     * unreadable payload (torn by a concurrent save, or an oversized external one)
+     * counts as full so it keeps the old behaviour of being swept.
+     */
+    private static boolean isFullChunk(RandomAccessFile raf, byte[] header, int i) {
+        int b = i * 4;
+        int off = ((header[b] & 0xFF) << 16) | ((header[b + 1] & 0xFF) << 8) | (header[b + 2] & 0xFF);
+        try {
+            byte[] data = StructureScanner.readChunk(raf, off, header[b + 3] & 0xFF);
+            return data == null || "minecraft:full".equals(Nbt.read(data).get("Status"));
+        } catch (IOException e) {
+            return true;
+        }
+    }
+
     /** Region files with at least one eligible chunk, packed [rx,rz,...] nearest-to-spawn first. */
     private int[] listRegions(String world, File regionDir, int spawnCx, int spawnCz, long minAge,
-                              boolean skipUnchanged) throws IOException {
+                              boolean skipUnchanged, Bounds bounds) throws IOException {
         List<long[]> regs = new ArrayList<>();
-        long now = System.currentTimeMillis() / 1000L;
-        byte[] header = new byte[HEADER_BYTES];
         forEachRegionFile(regionDir, (f, rx, rz) -> {
-            if (!readHeader(f, header)) {
-                return;
-            }
-            int[] stamp = skipUnchanged ? stamps.region(world, rx, rz) : null;
-            for (int i = 0; i < SLOTS; i++) {
-                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge, skipUnchanged, stamp)) {
-                    long dx = (long) (rx * 32 + 16) - spawnCx;
-                    long dz = (long) (rz * 32 + 16) - spawnCz;
-                    regs.add(new long[]{dx * dx + dz * dz, rx, rz});
-                    return; // one eligible chunk is enough to include this tile
-                }
+            if (eligibleSlots(world, f, rx, rz, spawnCx, spawnCz, minAge, skipUnchanged, bounds,
+                    true, true).length > 0) {
+                long dx = (long) (rx * 32 + 16) - spawnCx;
+                long dz = (long) (rz * 32 + 16) - spawnCz;
+                regs.add(new long[]{dx * dx + dz * dz, rx, rz});
             }
         });
         regs.sort(Comparator
@@ -880,41 +969,23 @@ public final class RegenEngine {
 
     /** Eligible chunks within one region file, packed [cx,cz,...]. */
     private int[] scanTile(String world, File regionDir, int rx, int rz, int spawnCx, int spawnCz,
-                           long minAge, boolean skipUnchanged) throws IOException {
-        byte[] header = new byte[HEADER_BYTES];
-        if (!readHeader(new File(regionDir, "r." + rx + "." + rz + ".mca"), header)) {
-            return EMPTY;
+                           long minAge, boolean skipUnchanged, Bounds bounds) throws IOException {
+        int[] slots = eligibleSlots(world, new File(regionDir, "r." + rx + "." + rz + ".mca"), rx, rz,
+                spawnCx, spawnCz, minAge, skipUnchanged, bounds, false, true);
+        int[] chunks = new int[slots.length * 2];
+        for (int k = 0; k < slots.length; k++) {
+            chunks[2 * k] = rx * 32 + (slots[k] & 31);
+            chunks[2 * k + 1] = rz * 32 + (slots[k] >> 5);
         }
-        long now = System.currentTimeMillis() / 1000L;
-        int[] stamp = skipUnchanged ? stamps.region(world, rx, rz) : null;
-        int[] buf = new int[SLOTS * 2]; // worst case: every slot eligible
-        int k = 0;
-        for (int i = 0; i < SLOTS; i++) {
-            if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge, skipUnchanged, stamp)) {
-                buf[k++] = rx * 32 + (i & 31);
-                buf[k++] = rz * 32 + (i >> 5);
-            }
-        }
-        return k == 0 ? EMPTY : Arrays.copyOf(buf, k);
+        return chunks;
     }
 
     /** Count eligible chunks across all region files in a world (for /wr count). */
     private long countEligible(String world, File regionDir, int spawnCx, int spawnCz, long minAge,
-                               boolean skipUnchanged) throws IOException {
-        long now = System.currentTimeMillis() / 1000L;
-        byte[] header = new byte[HEADER_BYTES];
+                               boolean skipUnchanged, Bounds bounds) throws IOException {
         long[] count = {0L};
-        forEachRegionFile(regionDir, (f, rx, rz) -> {
-            if (!readHeader(f, header)) {
-                return;
-            }
-            int[] stamp = skipUnchanged ? stamps.region(world, rx, rz) : null;
-            for (int i = 0; i < SLOTS; i++) {
-                if (isEligible(header, i, rx, rz, spawnCx, spawnCz, now, minAge, skipUnchanged, stamp)) {
-                    count[0]++;
-                }
-            }
-        });
+        forEachRegionFile(regionDir, (f, rx, rz) -> count[0] += eligibleSlots(world, f, rx, rz,
+                spawnCx, spawnCz, minAge, skipUnchanged, bounds, false, false).length);
         return count[0];
     }
 
@@ -970,36 +1041,60 @@ public final class RegenEngine {
         }
     }
 
-    /** Load the next tile's eligible chunks; true if a tile is now active for this tick. */
+    /**
+     * Activate the next tile; true if one is active for this tick. Its chunk scan
+     * reads chunk payloads, so it runs off the main thread: this call dispatches it
+     * and returns false, and the tile activates on the tick after the scan lands.
+     */
     private boolean beginTile(World w) {
+        if (tileScanning) {
+            return false;
+        }
         if (regionPos >= regionCount) {
             if (inFlight == 0) {
                 advanceWorld();
             }
             return false;
         }
-        int rx = regions[2 * regionPos];
-        int rz = regions[2 * regionPos + 1];
-        int[] chunks;
-        try {
-            chunks = scanTile(cur.name(), regionDir(cur, w), rx, rz, curSpawnCx, curSpawnCz,
-                    cur.minAgeSeconds(), skipUnchanged);
-        } catch (Throwable t) {
-            plugin.getLogger().warning("Tile scan failed r." + rx + "." + rz + ": " + t);
-            chunks = EMPTY;
-        }
-        if (chunks.length == 0) {
-            regionPos++; // nothing eligible here; move on next tick
-            return false;
-        }
-        tileChunks = chunks;
-        tileN = chunks.length / 2;
-        tileDeleted = new boolean[tileN];
-        tileDelPos = 0;
-        tileLoadPos = 0;
-        tileDeleting = true;
-        tileActive = true;
-        return true;
+        final WorldEntry entry = cur;
+        final int[] tiles = regions;
+        final int pos = regionPos;
+        final int rx = tiles[2 * pos];
+        final int rz = tiles[2 * pos + 1];
+        final File dir = regionDir(entry, w);
+        final int spawnCx = curSpawnCx;
+        final int spawnCz = curSpawnCz;
+        final boolean skip = skipUnchanged;
+        final Bounds bounds = Bounds.of(w);
+        tileScanning = true;
+        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+            int[] scanned;
+            try {
+                scanned = scanTile(entry.name(), dir, rx, rz, spawnCx, spawnCz, entry.minAgeSeconds(), skip, bounds);
+            } catch (Throwable t) {
+                plugin.getLogger().warning("Tile scan failed r." + rx + "." + rz + ": " + t);
+                scanned = EMPTY;
+            }
+            final int[] chunks = scanned;
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                tileScanning = false;
+                if (cur != entry || regions != tiles || regionPos != pos || tileActive) {
+                    return; // the sweep was reset or restarted while scanning; drop this result
+                }
+                if (chunks.length == 0) {
+                    regionPos++; // nothing eligible here; move on next tick
+                    return;
+                }
+                tileChunks = chunks;
+                tileN = chunks.length / 2;
+                tileDeleted = new boolean[tileN];
+                tileDelPos = 0;
+                tileLoadPos = 0;
+                tileDeleting = true;
+                tileActive = true;
+            });
+        });
+        return false;
     }
 
     private void runDeletePhase(World w) {

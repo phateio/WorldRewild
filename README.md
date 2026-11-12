@@ -10,7 +10,11 @@ nobody has touched for a while:
 1. It sweeps a world one **region file at a time** (a "tile" = 32×32 chunks),
    nearest-to-spawn first. A chunk is eligible when its last-saved time (the
    region file's per-chunk timestamp — bumped when the chunk is modified and
-   saved, not by merely loading it) is older than the world's `min-age`.
+   saved, not by merely loading it) is older than the world's `min-age`, it
+   lies inside the world border, and it is **fully generated** — the partial
+   proto-chunks that generation writes around explored land are never swept.
+   Regenerating those to full would write a fresh ring of proto-chunks further
+   out, and every sweep would push the world outward without bound.
 2. Each tile is regenerated **two-phase**: first it deletes every eligible
    chunk's block/entity/POI data through Paper's **Moonrise** chunk system, then
    it reloads them so the server **regenerates each from scratch with the current

@@ -28,7 +28,10 @@ worlds:
 # mobs), then unload/save. Deleting the whole tile first lets interior chunks
 # regenerate free of old neighbours, so a cross-version map actually converts
 # instead of blending back toward the old terrain; a thin biome-only rim on tile
-# edges heals when that area is next swept. No FAWE.
+# edges heals when that area is next swept. No FAWE. Only fully generated chunks
+# inside the world border are ever swept: the partial proto-chunks generation
+# leaves around explored land stay untouched until a player actually visits them,
+# so the sweep never grows the world outward.
 resident-sweep:
   # Run automatically at boot. Off by default (it is the heavy part) — start it on
   # demand with /wr start. structure-reset below runs regardless of this.
